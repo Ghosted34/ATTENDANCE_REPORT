@@ -5,13 +5,13 @@ import { closePool } from "./db/pool.js";
 let server = null;
 const conns = new Set();
 
-/** Listens on 127.0.0.1 with a free port (port 0) and resolves with that port. */
-export function startServer(opts) {
+/** Listens on loopback by default; Electron uses a free port, local mode can choose one. */
+export function startServer(opts, { host = "127.0.0.1", port = 0 } = {}) {
   return new Promise((resolve, reject) => {
     server = http.createServer(createApp(opts));
     server.on("connection", (c) => { conns.add(c); c.on("close", () => conns.delete(c)); });
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve(server.address().port));
+    server.listen(port, host, () => resolve(server.address().port));
   });
 }
 

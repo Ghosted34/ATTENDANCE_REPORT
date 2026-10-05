@@ -6,6 +6,7 @@ import * as store from "./config-store.js";
 import { startServer, stopServer } from "../server/index.js";
 import { testConnection, configure, getPool } from "../server/db/pool.js";
 import { brand } from "../server/brand.js";
+import { normalizeDatabaseConfig } from "../server/config.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ui = (...p) => path.join(here, "..", "renderer", ...p);
@@ -74,23 +75,21 @@ function buildMenu() {
 ipcMain.handle("settings:get", () => {
   const c = store.load();
   return c
-    ? { ...c, password: "", hasPassword: Boolean(c.password), source: store.source() }
-    : { host: "", port: "1433", user: "", password: "", database: "", tzOffsetHours: 1,
-        hasPassword: false, source: store.source() };
+    ? { ...c, password: "", hasPassword: true }
+    : { host: "", port: "1433", user: "", password: "", database: "", tzOffsetHours: 1, hasPassword: false };
 });
 
 ipcMain.handle("settings:save", async (_e, v) => {
   try {
     const old = store.load();
-    const cfg = {
-      host: String(v.host || "").trim(), port: Number(v.port), user: String(v.user || "").trim(),
-      password: v.password || old?.password || "", database: String(v.database || "").trim(),
-      tzOffsetHours: Number(v.tzOffsetHours),
-    };
-    if (!cfg.host || !cfg.user || !cfg.database || !cfg.password) throw new Error("Fill in every field.");
-    if (!Number.isInteger(cfg.port) || cfg.port < 1 || cfg.port > 65535) throw new Error("Port must be 1–65535.");
-    if (!Number.isInteger(cfg.tzOffsetHours) || cfg.tzOffsetHours < -12 || cfg.tzOffsetHours > 14)
-      throw new Error("UTC offset must be a whole number of hours.");
+    const cfg = normalizeDatabaseConfig({
+      host: v.host,
+      port: v.port,
+      user: v.user,
+      password: v.password || old?.password || "",
+      database: v.database,
+      tzOffsetHours: v.tzOffsetHours,
+    });
     await testConnection(cfg);       // save only if it connects
     store.save(cfg);
     await configure(cfg);            // recycles the pool, no restart needed

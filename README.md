@@ -1,120 +1,85 @@
 # Reports Desk
 
-Attendance reports over a SQL Server door-access database. It runs **two ways**: as a plain web app in your browser for local development, and as a packaged Electron desktop app.
+Attendance Reports runs in two modes: a standalone local web server opened in your browser, or the Electron desktop app. **Their configuration is separate:** local browser mode reads `.env`; Electron always uses its JSON settings store.
 
-## What runs where
+## Requirements
 
-| Part | Path | Role |
-| --- | --- | --- |
-| Electron main process | `main/` | splash, settings window, app window, menus — desktop only |
-| Express server + API | `server/` | serves the UI and the report API; runs inside Electron **or** standalone |
-| Renderer | `renderer/app/` | plain HTML + vanilla JS, served by that Express server |
+- Node.js 20 or newer and npm
+- Access to a SQL Server database containing `dbo.EventHistory` and `dbo.p_people`
 
-The renderer never touches SQL — it calls `/api/...` on the server, which is the same code in both phases.
+## Local browser mode (separate from Electron)
 
----
-
-## The two phases
-
-| | **Phase 1 — local dev** | **Phase 2 — desktop app** |
-| --- | --- | --- |
-| Command | `npm run dev` | `npm start` (from source) or the installer |
-| Runs in | your browser at `http://127.0.0.1:3000` | an Electron window |
-| nodemon | yes — restarts the server | not used, not needed |
-| Config source | `.env` | `config.json` in `<userData>` (or `.env` if run unpackaged) |
-| API token | none — open, so it stays on loopback | random per-launch secret injected by Electron |
-| PDF export | unavailable (501) — needs Electron's `printToPDF` | works |
-| Settings UI | none — edit `.env` | File → Database settings… (Ctrl+,) |
-
----
-
-## Phase 1 — local development in the browser
+From the repository root:
 
 ```bash
 npm install
-cp .env.example .env     # fill in DB_HOST, DB_NAME, DB_USER, DB_PASSWORD
-npm run dev              # nodemon -> node server/start.js
 ```
 
-Open **http://127.0.0.1:3000** and sign in with `admin` / `admin` (the mock login in `server/auth.js`).
-
-- **nodemon watches `server/`, `brand.json` and `.env`** (see `nodemon.json`) and restarts on change. It does *not* watch `renderer/` — the browser reloads those, so just refresh.
-- `npm run serve` starts the same server without watching.
-- If SQL Server is unreachable at boot, the server prints the real error and exits; nodemon waits for you to fix `.env` rather than spinning.
-- **Excel export works. PDF returns 501** — it is produced by Electron's `printToPDF`, which doesn't exist here. Test PDFs in Phase 2.
-- The dev server has no API token, so keep `HOST` on `127.0.0.1` (the default). Setting `HOST=0.0.0.0` puts an unauthenticated window onto your database.
-
-## Phase 2 — the desktop app
+Copy the example environment file and edit it with your SQL Server connection details:
 
 ```bash
-npm start        # run the desktop shell from source
-npm run dist     # build a Windows NSIS x64 installer into dist/
-```
-
-- First launch: splash → **Database settings** → fill in Server / Port / Database / Username / Password / *Hours ahead of UTC* → **Test and save** (it runs `SELECT 1` first, and only saves if it connects).
-- Later: **File → Database settings…** (Ctrl+,). Saving recycles the connection pool — no restart needed. The window tells you which file it will write to.
-- **View → Toggle DevTools** is available when running unpackaged.
-- `npm run dist` currently only defines a `win` target in `electron-builder.json`.
-
----
-
-## Environment / configuration
-
-| How you run it | Settings read from | Password stored as |
-| --- | --- | --- |
-| `npm run dev` / `npm run serve` | **`.env`** | plaintext — dev only, gitignored |
-| `npm start` (unpackaged) | **`.env`** if present, else `config.json` | plaintext / `safeStorage`-encrypted |
-| Installed app | **`<userData>/config.json`** | encrypted with Electron `safeStorage` |
-
-```bash
+# macOS / Linux
 cp .env.example .env
+
+# Windows PowerShell
+Copy-Item .env.example .env
 ```
 
-| Variable | Required | Default |
-| --- | --- | --- |
-| `DB_HOST` | yes | — |
-| `DB_NAME` | yes | — |
-| `DB_USER` | yes | — |
-| `DB_PASSWORD` | yes (may be empty) | — |
-| `DB_PORT` | no | `1433` |
-| `TZ_OFFSET_HOURS` | no | `1` (Nigeria / WAT) |
-| `PORT` | no | `3000` — dev server only |
-| `HOST` | no | `127.0.0.1` — dev server only |
+Set `DB_HOST`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` in `.env`. The defaults are SQL Server port `1433` and Nigeria's UTC offset `1`.
 
-Rules, all in `server/env.js`:
+Start the local server with file watching:
 
-- **Precedence: shell variables > `.env` > `config.json`.** `DB_HOST=10.0.0.5 npm run dev` retargets without editing anything.
-- A **partial or invalid** `.env` (missing a required key, `DB_PORT=99999`, `TZ_OFFSET_HOURS=99`) is ignored with a warning in the terminal instead of being half-applied.
-- `.env` is **never packaged** — the `files` allowlist in `electron-builder.json` ships only `main/`, `server/`, `renderer/` and `brand.json`. Dropping a `.env` next to the installed exe does nothing.
-- The installed app writes `<userData>/config.json`: `%APPDATA%\reports-desk\config.json` on Windows, `~/Library/Application Support/reports-desk/config.json` on macOS, `~/.config/reports-desk/config.json` on Linux. To start over, delete it and relaunch.
-- That file is per machine and per OS user, so copying it elsewhere won't decrypt — use the settings window there.
+```bash
+npm run dev
+```
 
----
+Or start it once without a watcher:
 
-## What the database needs to look like
+```bash
+npm run serve
+```
+
+Open **http://127.0.0.1:3000**. The server tests the database connection before it starts and binds to `127.0.0.1` only. Press **Ctrl+C** to stop it. `npm run dev` watches `server/`, `brand.json`, and `.env`; refresh the browser after renderer changes.
+
+The local server uses the same reports and UI as Electron. Excel export is supported; local PDF export is rendered by PDFKit, while Electron continues to use Chromium's PDF renderer.
+
+The current sign-in is a development placeholder: `admin` / `admin`. Do not expose the app or use that credential for a production deployment.
+
+## Electron desktop mode
+
+```bash
+npm start
+```
+
+On first launch, enter the database settings in the desktop setup window. The app tests the connection before saving. Later, use **File → Database settings…** to update it. Electron saves settings as JSON under Electron's app-specific `userData` folder; the password is encrypted with Electron `safeStorage`.
+
+**Electron does not read or write the local `.env` file**, whether run from source or installed. This keeps local development credentials separate from desktop settings.
+
+Build the Windows installer with:
+
+```bash
+npm run dist
+```
+
+## Local environment variables
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `DB_HOST` | Yes | — | SQL Server hostname or IP address |
+| `DB_NAME` | Yes | — | Database containing the attendance tables |
+| `DB_USER` | Yes | — | SQL Server login |
+| `DB_PASSWORD` | Yes | — | SQL Server password |
+| `DB_PORT` | No | `1433` | SQL Server port |
+| `TZ_OFFSET_HOURS` | No | `1` | Local time offset from UTC, in whole hours |
+| `PORT` | No | `3000` | Local web server port |
+
+Shell environment variables override values from `.env`. Do not commit `.env`; it is git-ignored. The local server intentionally does not bind to other network interfaces because it has no Electron app token.
+
+## Database expectations
 
 The attendance report (`server/reports/attendance.js`) expects:
 
-- **`dbo.EventHistory`** — `PeopleID`, `CardNumber`, `EventCategory`, `EventDescription`, `EventUTCTime`
-- **`dbo.p_people`** — `PeopleID`, `Firstname`, `Lastname`, `Department` (LEFT JOINed; people missing from it show as "Unknown" / "Unassigned")
+- `dbo.EventHistory`: `PeopleID`, `CardNumber`, `EventCategory`, `EventDescription`, `EventUTCTime`
+- `dbo.p_people`: `PeopleID`, `Firstname`, `Lastname`, `Department`
 
-Rows are filtered to `EventCategory = 10001 AND EventDescription = 'Access Granted' AND CardNumber IS NOT NULL AND CardNumber <> 0`, then grouped per person for the selected local day.
-
-Also worth knowing:
-
-- **Times are stored in UTC** and shifted by `TZ_OFFSET_HOURS`.
-- The login needs **SELECT on those two tables**, nothing more.
-- Connection options (`server/db/pool.js`): `trustServerCertificate: true`, 5 s connect timeout, 30 s query timeout, pool of 10.
-- In the desktop app an unreachable database gives you an **Open settings / Quit** dialog instead of starting half-broken.
-
-## Adding a report
-
-Create `server/reports/<name>.js` with the same shape as `attendance.js` (`id`, `title`, `params`, `columns`, `run()`) and add it to the map in `server/reports/registry.js`. It appears in the UI automatically, in both phases.
-
-## Gotchas
-
-- **Electron needs a display.** On a headless Linux box, run `xvfb-run npm start`.
-- **Only one desktop instance at a time** — a second launch just focuses the open window.
-- `renderer/setup/setup.html` is the Electron settings window; it talks to the main process over a preload bridge, so it does nothing in the browser. In Phase 1, edit `.env` instead.
-- Login is mocked (`admin` / `admin`) in both phases — see `server/auth.js`.
-- If the Electron binary won't download (proxy, blocked GitHub releases): `npm config set electron_mirror https://npmmirror.com/mirrors/electron/`
+It filters for granted access events and groups results by person for the selected local day. Event times are stored in UTC and shifted by `TZ_OFFSET_HOURS`.
