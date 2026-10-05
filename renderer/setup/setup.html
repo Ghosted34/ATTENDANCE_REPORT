@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Database settings</title>
+<link rel="stylesheet" href="../app/css/styles.css"><script src="../app/js/theme.js"></script></head>
+<body>
+<form class="settings" id="f" autocomplete="off">
+  <h1>Database settings</h1>
+  <p class="muted" style="margin-bottom:1.25rem">We test the connection before saving. The password is stored encrypted on this computer.</p>
+  <div class="row">
+    <div class="field"><label for="host">Server</label><input id="host" placeholder="192.168.1.10 or SERVER\SQLEXPRESS" required></div>
+    <div class="field"><label for="port">Port</label><input id="port" type="number" min="1" max="65535" required></div>
+  </div>
+  <div class="field"><label for="database">Database</label><input id="database" required></div>
+  <div class="field"><label for="user">Username</label><input id="user" required></div>
+  <div class="field"><label for="password">Password</label><input id="password" type="password" autocomplete="new-password"></div>
+  <div class="field"><label for="tzOffsetHours">Hours ahead of UTC</label>
+    <input id="tzOffsetHours" type="number" min="-12" max="14" step="1" required>
+    <p class="hint">Event times are stored in UTC. Use 1 for Nigeria.</p></div>
+  <div class="msg" id="m" role="alert"></div>
+  <div class="actions">
+    <button type="button" class="btn" id="cancel">Cancel</button>
+    <button class="btn primary" id="save">Test and save</button>
+  </div>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const keys = ["host", "port", "database", "user", "password", "tzOffsetHours"];
+  bridge.getSettings().then((s) => {
+    keys.forEach((k) => ($(k).value = s[k] ?? ""));
+    if (s.hasPassword) $("password").placeholder = "Leave blank to keep the current password";
+    else $("password").required = true;
+  });
+  $("cancel").onclick = () => window.close();
+  $("f").onsubmit = async (e) => {
+    e.preventDefault();
+    const m = $("m"), btn = $("save");
+    btn.disabled = true; btn.textContent = "Testing connection…"; m.className = "msg"; m.textContent = "";
+    const res = await bridge.saveSettings(Object.fromEntries(keys.map((k) => [k, $(k).value])));
+    if (res.ok) { m.className = "msg ok"; m.textContent = "Connected and saved."; btn.textContent = "Saved"; }
+    else { m.className = "msg err"; m.textContent = res.error; btn.disabled = false; btn.textContent = "Test and save"; }
+  };
+</script>
+</body></html>
