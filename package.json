@@ -8,6 +8,7 @@
     "start": "electron .",
     "dev": "nodemon",
     "serve": "node server/start.js",
+    "doctor": "node server/doctor.js",
     "test": "node --test",
     "dist": "electron-builder --win"
   },
