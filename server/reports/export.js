@@ -13,28 +13,35 @@ export function group(report, rows) {
   return [...m].map(([name, rows]) => ({ name, rows }));
 }
 
+/** Columns for a run: reports may vary them by mode (the attendance range adds Date). */
+export const columnsOf = (report, params) => (report.columnsFor ? report.columnsFor(params) : report.columns) || [];
+
+const widthFor = (column) =>
+  ["date", "firstEntry", "lastEntry"].includes(column.key) ? 14 : Math.max(14, column.label.length + 4);
+
 export async function toXlsx(report, rows, params) {
+  const cols = columnsOf(report, params);
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet(report.title.slice(0, 31));
   ws.addRow([report.title]).font = { bold: true, size: 14 };
   ws.addRow([report.subtitle(params)]);
   ws.addRow([]);
-  const head = ws.addRow(report.columns.map((c) => c.label));
+  const head = ws.addRow(cols.map((c) => c.label));
   head.font = { bold: true };
   head.eachCell((c) => { c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE2E8F0" } }; });
   for (const g of group(report, rows)) {
     if (g.name !== null) ws.addRow([`${g.name} (${g.rows.length})`]).font = { bold: true };
-    for (const r of g.rows) ws.addRow(report.columns.map((c) => r[c.key]));
+    for (const r of g.rows) ws.addRow(cols.map((c) => r[c.key]));
   }
   ws.addRow([]);
   ws.addRow([`Total: ${rows.length}`]).font = { bold: true };
-  report.columns.forEach((c, i) => { ws.getColumn(i + 1).width = Math.max(14, c.label.length + 4); });
-  ws.getColumn(1).width = 32;
+  cols.forEach((c, i) => { ws.getColumn(i + 1).width = widthFor(c); });
+  ws.getColumn(1).width = cols[0]?.key === "date" ? 14 : 32;
   return Buffer.from(await wb.xlsx.writeBuffer());
 }
 
 export function toHtml(report, rows, params, brandName) {
-  const cols = report.columns;
+  const cols = columnsOf(report, params);
   const body = group(report, rows).map((g) =>
     (g.name !== null ? `<tr class="g"><td colspan="${cols.length}">${esc(g.name)} (${g.rows.length})</td></tr>` : "") +
     g.rows.map((r) => `<tr>${cols.map((c) => `<td class="${c.align || ""}">${esc(r[c.key])}</td>`).join("")}</tr>`).join("")

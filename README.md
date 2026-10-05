@@ -61,6 +61,25 @@ Build the Windows installer with:
 npm run dist
 ```
 
+## Running the daily attendance report
+
+The report form has a **Report for** choice:
+
+- **Single date** (default) — pick one day; the table keeps its original columns and is grouped by department.
+- **Date range** — pick a **Start date** and an **End date**; results get a leading **Date** column and contain one row per person per local calendar day, so the same person's days are never merged into a single row.
+
+Both modes use the same parameterized SQL, the same `TZ_OFFSET_HOURS` shift, and the same one-row-per-person-per-local-day grouping; a single date is simply a one-day range. Invalid dates (for example `2026-02-31`) and ranges whose start is after the end are refused in the browser and by the API with HTTP `400`, so exports cannot be produced from bad input either.
+
+The toolbar's query string is the API contract, and both browser and Electron mode use it:
+
+| Parameter | Used by | Description |
+| --- | --- | --- |
+| `mode` | Both | `single` (default when omitted) or `range` |
+| `date` | `mode=single` | Local day as `YYYY-MM-DD` |
+| `start`, `end` | `mode=range` | Local first and last day as `YYYY-MM-DD` |
+
+Excel and PDF exports match the mode: range exports add the **Date** column and are named `attendance-<start>_to_<end>.xlsx` / `.pdf`; single-date exports keep the original layout and `attendance-<date>` name.
+
 ## Local environment variables
 
 | Variable | Required | Default | Description |
@@ -82,4 +101,4 @@ The attendance report (`server/reports/attendance.js`) expects:
 - `dbo.EventHistory`: `PeopleID`, `CardNumber`, `EventCategory`, `EventDescription`, `EventUTCTime`
 - `dbo.p_people`: `PeopleID`, `Firstname`, `Lastname`, `Department`
 
-It filters for granted access events and groups results by person for the selected local day. Event times are stored in UTC and shifted by `TZ_OFFSET_HOURS`.
+It filters for granted access events and groups results by person **and local calendar day**. Event times are stored in UTC and shifted by `TZ_OFFSET_HOURS`; the queried UTC window runs from local midnight of the first selected day to local midnight after the last one. In range mode each row also carries its local date for the UI and the exports.

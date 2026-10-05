@@ -1,5 +1,5 @@
 import PDFDocument from "pdfkit";
-import { group } from "./export.js";
+import { columnsOf, group } from "./export.js";
 
 const MARGIN = 36;
 const HEADER_HEIGHT = 22;
@@ -20,6 +20,7 @@ function pdfText(value) {
 
 function columnWidths(columns, width) {
   const weights = columns.map((column) => {
+    if (column.key === "date") return 0.95;
     if (column.key === "name") return 1.65;
     if (column.key === "department") return 1.35;
     if (column.key === "peopleId") return 1.1;
@@ -50,7 +51,8 @@ export function toPdf(report, rows, params, brandName) {
     const pageHeight = doc.page.height;
     const tableX = MARGIN;
     const tableWidth = pageWidth - MARGIN * 2;
-    const widths = columnWidths(report.columns, tableWidth);
+    const cols = columnsOf(report, params);
+    const widths = columnWidths(cols, tableWidth);
     const bottom = pageHeight - MARGIN;
     let y = MARGIN;
 
@@ -58,7 +60,7 @@ export function toPdf(report, rows, params, brandName) {
       doc.save().fillColor("#e2e8f0").rect(tableX, y, tableWidth, HEADER_HEIGHT).fill().restore();
       doc.font("Helvetica-Bold").fontSize(8).fillColor("#0f172a");
       let x = tableX;
-      report.columns.forEach((column, index) => {
+      cols.forEach((column, index) => {
         doc.text(pdfText(column.label), x + 5, y + 7, {
           width: Math.max(1, widths[index] - 10),
           height: 10,
@@ -113,7 +115,7 @@ export function toPdf(report, rows, params, brandName) {
         }
         doc.font("Helvetica").fontSize(8).fillColor("#1e293b");
         let x = tableX;
-        report.columns.forEach((column, index) => {
+        cols.forEach((column, index) => {
           doc.text(pdfText(row[column.key]), x + 5, y + 7, {
             width: Math.max(1, widths[index] - 10),
             height: 10,

@@ -48,8 +48,7 @@ function reportView(id) {
     <a class="back" href="#/reports">‹ All reports</a>
     <h1>${esc(r.title)}</h1><p class="muted">${esc(r.description)}</p>
     <form class="toolbar" id="f">
-      ${r.params.map((p) => `<div class="field"><label for="p_${p.name}">${esc(p.label)}</label>
-        <input id="p_${p.name}" name="${p.name}" type="${p.type}" value="${p.type === "date" ? today : ""}" required></div>`).join("")}
+      ${r.params.map((p) => paramField(p, today)).join("")}
       <button class="btn primary">Run report</button>
       <span class="spacer"></span>
       <button type="button" class="btn" data-x="xlsx" disabled>Export Excel</button>
@@ -59,17 +58,44 @@ function reportView(id) {
     <div class="table-wrap hidden" id="out"></div></main>`;
 
   const form = $("#f"), msg = $("#m"), out = $("#out");
+  const modeInput = form.elements.mode;
   const qs = () => new URLSearchParams(new FormData(form)).toString();
+  const values = () => Object.fromEntries(new FormData(form));
   const setMsg = (t, cls = "") => { msg.textContent = t; msg.className = "msg " + cls; };
+
+  // Show only the fields for the selected mode; hidden fields are disabled so they are
+  // neither validated nor sent, and the server keeps validating whatever arrives.
+  const syncMode = () => {
+    const mode = modeInput ? modeInput.value : "single";
+    for (const field of form.querySelectorAll(".field[data-mode]")) {
+      const show = field.dataset.mode === mode;
+      field.classList.toggle("hidden", !show);
+      field.querySelectorAll("input,select").forEach((el) => (el.disabled = !show));
+    }
+  };
+  if (modeInput) { modeInput.onchange = syncMode; syncMode(); }
+
+  const validate = () => {
+    const v = values();
+    if ((v.mode || "single") === "range" && v.start > v.end)
+      return "The start date must be on or before the end date.";
+    return "";
+  };
 
   form.onsubmit = async (e) => {
     e.preventDefault();
+    const invalid = validate();
+    if (invalid) { out.classList.add("hidden"); return setMsg(invalid, "err"); }
     setMsg("Running…");
     form.querySelectorAll("[data-x]").forEach((b) => (b.disabled = true));
     try {
-      const { rows, subtitle } = await (await api(`/reports/${id}/data?${qs()}`)).json();
+      const { rows, subtitle, columns } = await (await api(`/reports/${id}/data?${qs()}`)).json();
+      const cols = columns?.length ? columns : r.columns;
+      const range = (values().mode || "single") === "range";
       out.classList.remove("hidden");
-      out.innerHTML = rows.length ? table(r, rows) : `<div class="empty">No records for this date. Try another date.</div>`;
+      out.innerHTML = rows.length
+        ? table(cols, r.groupBy, rows)
+        : `<div class="empty">No records for this ${range ? "date range" : "date"}. Try another ${range ? "range" : "date"}.</div>`;
       setMsg(`${subtitle} · ${rows.length} record${rows.length === 1 ? "" : "s"}`);
       form.querySelectorAll("[data-x]").forEach((b) => (b.disabled = !rows.length));
     } catch (err) { out.classList.add("hidden"); setMsg(err.message, "err"); }
@@ -80,7 +106,7 @@ function reportView(id) {
     b.disabled = true; b.textContent = "Preparing…";
     try {
       const blob = await (await api(`/reports/${id}/${ext}?${qs()}`)).blob();
-      const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: `${id}-${new FormData(form).get("date") || "report"}.${ext}` });
+      const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: `${id}-${fileStem(values())}.${ext}` });
       a.click(); URL.revokeObjectURL(a.href);
       setMsg(`Saved ${ext === "xlsx" ? "Excel" : "PDF"} file to Downloads.`, "ok");
     } catch (err) { setMsg(err.message, "err"); }
@@ -88,14 +114,35 @@ function reportView(id) {
   }));
 }
 
-function table(r, rows) {
-  const head = `<thead><tr>${r.columns.map((c) => `<th class="${c.align || ""}">${esc(c.label)}</th>`).join("")}</tr></thead>`;
-  const line = (row) => `<tr>${r.columns.map((c) => `<td class="${c.align || ""}">${esc(row[c.key])}</td>`).join("")}</tr>`;
+/* Range runs are named for their whole window; single runs for their day. */
+function fileStem(v) {
+  if ((v.mode || "single") === "range") return v.start && v.end ? `${v.start}_to_${v.end}` : "range";
+  return v.date || "report";
+}
+
+function paramField(p, today) {
+  const id = `p_${p.name}`;
+  const mode = p.mode ? ` data-mode="${esc(p.mode)}"` : "";
+  if (p.type === "select") {
+    const options = (p.options || []).map((o) =>
+      `<option value="${esc(o.value)}"${o.value === p.default ? " selected" : ""}>${esc(o.label)}</option>`).join("");
+    return `<div class="field"${mode}><label for="${id}">${esc(p.label)}</label>
+      <select id="${id}" name="${p.name}">${options}</select></div>`;
+  }
+  const type = p.type === "date" ? "date" : p.type === "number" ? "number" : "text";
+  const value = type === "date" ? today : esc(p.default ?? "");
+  return `<div class="field"${mode}><label for="${id}">${esc(p.label)}</label>
+    <input id="${id}" name="${p.name}" type="${type}" value="${value}" required></div>`;
+}
+
+function table(cols, groupBy, rows) {
+  const head = `<thead><tr>${cols.map((c) => `<th class="${c.align || ""}">${esc(c.label)}</th>`).join("")}</tr></thead>`;
+  const line = (row) => `<tr>${cols.map((c) => `<td class="${c.align || ""}">${esc(row[c.key])}</td>`).join("")}</tr>`;
   let body = "";
-  if (r.groupBy) {
-    const groups = Map.groupBy(rows, (x) => x[r.groupBy]);
+  if (groupBy) {
+    const groups = Map.groupBy(rows, (x) => x[groupBy]);
     for (const [name, list] of groups)
-      body += `<tr class="grp"><td colspan="${r.columns.length}">${esc(name)} (${list.length})</td></tr>` + list.map(line).join("");
+      body += `<tr class="grp"><td colspan="${cols.length}">${esc(name)} (${list.length})</td></tr>` + list.map(line).join("");
   } else body = rows.map(line).join("");
   return `<table>${head}<tbody>${body}</tbody></table>`;
 }

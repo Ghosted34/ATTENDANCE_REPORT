@@ -44,14 +44,17 @@ export function createApp({ secret, getConfig, renderPdf }) {
   const run = async (req) => {
     const report = reports.get(req.params.id);
     if (!report) throw Object.assign(new Error("Unknown report."), { status: 404 });
-    const params = Object.fromEntries(report.params.map((p) => [p.name, String(req.query[p.name] ?? "")]));
+    const raw = Object.fromEntries(report.params.map((p) => [p.name, String(req.query[p.name] ?? "")]));
+    // Reports own their validation so bad dates/ranges fail with a clear 400 before SQL runs.
+    const params = report.normalize ? report.normalize(raw) : raw;
     const rows = await report.run(params, { tz: getConfig().tzOffsetHours });
-    return { report, params, rows };
+    const columns = report.columnsFor ? report.columnsFor(params) : report.columns;
+    return { report, params, columns, rows };
   };
 
   api.get("/reports/:id/data", wrap(async (req, res) => {
-    const { rows, report, params } = await run(req);
-    res.json({ rows, subtitle: report.subtitle(params) });
+    const { rows, report, params, columns } = await run(req);
+    res.json({ rows, subtitle: report.subtitle(params), columns });
   }));
   api.get("/reports/:id/xlsx", wrap(async (req, res) => {
     const { report, params, rows } = await run(req);
