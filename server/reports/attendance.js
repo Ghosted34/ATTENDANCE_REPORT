@@ -21,6 +21,8 @@ WHERE eh.EventCategory = 10001
   AND eh.EventDescription = 'Access Granted'
   AND eh.CardNumber IS NOT NULL AND eh.CardNumber <> 0
   AND eh.EventUTCTime >= @from AND eh.EventUTCTime < @to
+  -- Optional ID-number filter; empty means everyone. Compared as text so any PeopleID type works.
+  AND (@idNumber = '' OR CONVERT(VARCHAR(64), eh.PeopleID) = @idNumber)
 GROUP BY eh.PeopleID, pp.Firstname, pp.Lastname, pp.Department,
   CONVERT(VARCHAR(10), DATEADD(HOUR, @tz, eh.EventUTCTime), 23);`;
 
@@ -49,17 +51,22 @@ export function normalizeParams(values = {}) {
   const mode = String(values.mode ?? "").trim() || "single";
   if (!MODES.has(mode)) throw badRequest('Choose "Single date" or "Date range".');
 
+  const idNumber = String(values.idNumber ?? "").trim();
+  if (idNumber && !/^[A-Za-z0-9_-]{1,64}$/.test(idNumber)) {
+    throw badRequest("ID number can only contain letters, digits, dashes and underscores.");
+  }
+
   if (mode === "single") {
     const date = String(values.date ?? "").trim();
     if (!isIsoDate(date)) throw badRequest("Pick a valid date.");
-    return { mode, date, start: date, end: date };
+    return { mode, date, start: date, end: date, idNumber };
   }
 
   const start = String(values.start ?? "").trim();
   const end = String(values.end ?? "").trim();
   if (!isIsoDate(start) || !isIsoDate(end)) throw badRequest("Pick a valid start date and end date.");
   if (start > end) throw badRequest("The start date must be on or before the end date.");
-  return { mode, start, end };
+  return { mode, start, end, idNumber };
 }
 
 const isRange = (params = {}) =>
@@ -67,7 +74,7 @@ const isRange = (params = {}) =>
 
 const COLUMNS = [
   { key: "name", label: "Name" },
-  { key: "peopleId", label: "People ID" },
+  { key: "idNumber", label: "ID number" },
   { key: "cardNumber", label: "Card no." },
   { key: "firstEntry", label: "First entry" },
   { key: "lastEntry", label: "Last entry" },
@@ -78,6 +85,16 @@ const COLUMNS = [
 /** Range mode adds a Date column so the same person's days stay distinguishable. */
 export const columnsFor = (params = {}) => (isRange(params) ? [{ key: "date", label: "Date" }, ...COLUMNS] : [...COLUMNS]);
 
+/**
+ * Printed/exported template: it repeats the grouping column per row, so a sheet that is
+ * filtered or sorted still says who belongs to which department.
+ */
+export const exportColumnsFor = (params = {}) => {
+  const cols = columnsFor(params);
+  const at = cols.findIndex((c) => c.key === "idNumber") + 1;
+  return [...cols.slice(0, at), { key: "department", label: "Department" }, ...cols.slice(at)];
+};
+
 export function subtitle(params = {}) {
   if (!isRange(params)) return `Attendance for ${params.date ?? params.start ?? ""}`;
   const days = rangeDays(params.start, params.end);
@@ -85,15 +102,15 @@ export function subtitle(params = {}) {
 }
 
 async function run(params, { tz, queryFn = query } = {}) {
-  const { start, end } = normalizeParams(params);
-  const rows = await queryFn(SQL, { start, end, tz });
+  const { start, end, idNumber } = normalizeParams(params);
+  const rows = await queryFn(SQL, { start, end, idNumber: idNumber ?? "", tz });
   return rows
     .map((r) => {
       const single = r.DurationMin === 0; // one swipe: no check-out to show
       return {
         date: r.LocalDate ?? start,
         name: [r.Lastname, r.Firstname].filter(Boolean).join(" ") || "Unknown",
-        peopleId: r.PeopleID ?? "—",
+        idNumber: r.PeopleID ?? "—",
         department: r.Department || "Unassigned",
         cardNumber: r.CardNumber,
         firstEntry: r.FirstEntry,
@@ -126,10 +143,13 @@ export default {
     { name: "date", label: "Date", type: "date", mode: "single" },
     { name: "start", label: "Start date", type: "date", mode: "range" },
     { name: "end", label: "End date", type: "date", mode: "range" },
+    { name: "idNumber", label: "ID number", type: "text", optional: true, placeholder: "All",
+      hint: "Leave blank for everyone." },
   ],
   groupBy: "department",
   columns: COLUMNS,
   columnsFor,
+  exportColumnsFor,
   normalize: normalizeParams,
   subtitle,
   run,

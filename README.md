@@ -25,7 +25,15 @@ cp .env.example .env
 Copy-Item .env.example .env
 ```
 
-Set `DB_HOST`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` in `.env`. The defaults are SQL Server port `1433` and Nigeria's UTC offset `1`.
+Set `DB_CONNECTION_STRING` in `.env` to the full SQL Server connection string — it is the only database setting:
+
+```ini
+DB_CONNECTION_STRING=Server=192.168.1.10,1433;Database=VIAC;User Id=reports;Password=…;TrustServerCertificate=True
+```
+
+The app splits that string internally with the SQL Server driver: `Server`, `Database` and `User Id` are used for logs and messages, the port comes from the server value (default `1433`), and the password stays inside the string — it is never copied into a field of its own. `TZ_OFFSET_HOURS` defaults to Nigeria's `1`.
+
+Quoting note: `.env` follows dotenv rules, so if the password contains `#`, wrap the whole value in double quotes, for example `DB_CONNECTION_STRING="Server=…;Password=pa#ss;…"`. Passwords containing `;`, `{`, `}` or `"` can be wrapped in `{braces}` exactly as ADO.NET expects.
 
 Start the local server with file watching:
 
@@ -41,7 +49,7 @@ npm run serve
 
 Open **http://127.0.0.1:3000**. The server tests the database connection before it starts and binds to `127.0.0.1` only. Press **Ctrl+C** to stop it. `npm run dev` watches `server/`, `brand.json`, and `.env`; refresh the browser after renderer changes.
 
-The local server uses the same reports and UI as Electron. Excel export is supported; local PDF export is rendered by PDFKit, while Electron continues to use Chromium's PDF renderer.
+The local server uses the same reports and UI as Electron. Excel, CSV and PDF exports are all supported; local PDF export is rendered by PDFKit, while Electron continues to use Chromium's PDF renderer with the same template (page setup, columns and footer).
 
 The current sign-in is a development placeholder: `admin` / `admin`. Do not expose the app or use that credential for a production deployment.
 
@@ -51,7 +59,9 @@ The current sign-in is a development placeholder: `admin` / `admin`. Do not expo
 npm start
 ```
 
-On first launch, enter the database settings in the desktop setup window. The app tests the connection before saving. Later, use **File → Database settings…** to update it. Electron saves settings as JSON under Electron's app-specific `userData` folder; the password is encrypted with Electron `safeStorage`.
+On first launch, paste the database connection string into the desktop setup window and set the UTC offset. The app tests the connection before saving. Later, use **File → Database settings…** to update it: the saved string is shown with the password masked, and leaving the box empty keeps it.
+
+Electron saves settings as JSON under Electron's app-specific `userData` folder. Because the connection string holds the password, it is stored as one `safeStorage`-encrypted value (`connectionStringEnc`) next to the readable UTC offset; the settings window never receives the decrypted string back. Desktop settings saved by earlier versions (separate host/port/user/database fields with an encrypted password) are read once and rewritten in the new format on the next save.
 
 **Electron does not read or write the local `.env` file**, whether run from source or installed. This keeps local development credentials separate from desktop settings.
 
@@ -65,30 +75,57 @@ npm run dist
 
 The report form has a **Report for** choice:
 
-- **Single date** (default) — pick one day; the table keeps its original columns and is grouped by department.
+- **Single date** (default) — pick one day; the table shows Name, ID number, Card no., First entry, Last entry, Duration and Swipes, grouped by department.
 - **Date range** — pick a **Start date** and an **End date**; results get a leading **Date** column and contain one row per person per local calendar day, so the same person's days are never merged into a single row.
 
-Both modes use the same parameterized SQL, the same `TZ_OFFSET_HOURS` shift, and the same one-row-per-person-per-local-day grouping; a single date is simply a one-day range. Invalid dates (for example `2026-02-31`) and ranges whose start is after the end are refused in the browser and by the API with HTTP `400`, so exports cannot be produced from bad input either.
+**ID number** (optional) limits a run to one person. It matches `dbo.EventHistory.PeopleID` exactly; leave it blank for everyone.
 
-The toolbar's query string is the API contract, and both browser and Electron mode use it:
+Both modes use the same parameterized SQL, the same `TZ_OFFSET_HOURS` shift, and the same one-row-per-person-per-local-day grouping; a single date is simply a one-day range. Invalid dates (for example `2026-02-31`), ranges whose start is after the end, and ID numbers containing anything but letters, digits, dashes or underscores are refused in the browser and by the API with HTTP `400`, so exports cannot be produced from bad input either.
+
+The toolbar's query string is the whole API contract, and both browser and Electron mode use it:
 
 | Parameter | Used by | Description |
 | --- | --- | --- |
 | `mode` | Both | `single` (default when omitted) or `range` |
 | `date` | `mode=single` | Local day as `YYYY-MM-DD` |
 | `start`, `end` | `mode=range` | Local first and last day as `YYYY-MM-DD` |
+| `idNumber` | Both | Optional `PeopleID` filter |
 
-Excel and PDF exports match the mode: range exports add the **Date** column and are named `attendance-<start>_to_<end>.xlsx` / `.pdf`; single-date exports keep the original layout and `attendance-<date>` name.
+The **Excel**, **CSV** and **PDF** buttons export whatever the form currently holds, so the filters always match the screen. Exports repeat the grouping column (**Department**) per row, which keeps a filtered or sorted sheet readable, and are named for the window they cover:
+
+| Mode | Excel | CSV | PDF |
+| --- | --- | --- | --- |
+| Single date | `attendance-2026-10-05.xlsx` | `attendance-2026-10-05.csv` | `attendance-2026-10-05.pdf` |
+| Date range | `attendance-2026-10-04_to_2026-10-06.xlsx` | `attendance-2026-10-04_to_2026-10-06.csv` | `attendance-2026-10-04_to_2026-10-06.pdf` |
+
+## Report template
+
+Every report is one definition in `server/reports/`, rendered through a shared template in `renderer/app/js/template.js` and, for exports, `server/reports/export.js` plus `server/reports/print-template.js`.
+
+**Inputs.** A report declares its own fields (`params`), and the template renders them for it:
+
+- **Fixed inputs** — anything the report lists, with `type` `date`, `text` or `number`, or an `options` list. They are always rendered and always submitted; `default`, `optional`, `placeholder` and `hint` shape them.
+- **Defaults** — a field's own `default` wins; date fields otherwise start on today, and `mode`-tagged fields are hidden and disabled until that mode is selected.
+- **Dynamic (extra) inputs** — any *other* key in the page URL is passed straight through to the report on every run and export. That is how a URL such as `?mode=range&start=2026-08-16&end=2026-08-19&plant=Lagos` presets the window *and* keeps `plant=Lagos` travelling to the API, so a report can pick up parameters it needs beyond the visible fields. Extra keys are bounded as SQL parameters like every other value; nothing from the URL is ever concatenated into a statement.
+
+**Presentation.** `groupBy` (default `department`) turns rows into sections with a heading and a count; `columns` — or `columnsFor(params)` for mode-dependent tables — are rendered in order, with `align: "right"` and `wrap: true` honoured by the screen, the CSV and the printable template. `exportColumnsFor(params)` lets exports carry a column the screen shows as a section heading instead (that is where Department comes from).
+
+**API.** `GET /api/reports/<id>/data` returns `{ rows, subtitle, columns }`, `GET /api/reports/<id>/{xlsx,csv,pdf}` return the files. Both share one validated run, so the screen and the exports can never disagree.
+
+## PDF and print template
+
+`server/reports/print-template.js` holds the one page setup both PDF renderers use: **A4 landscape**, matching margins, and a footer with the report title, its window, the brand and *Page x of y*.
+
+- Electron renders `toHtml(...)` through Chromium's `printToPDF` with `printOptions(...)` from that module, so the footer and margins come from the template rather than from defaults.
+- The standalone server draws the same table with PDFKit (`server/reports/pdf.js`), with the same columns, group headings and subtitle.
+- `toHtml(...)` carries the same page setup as a CSS `@page` rule, so printing the HTML by hand looks the same too.
 
 ## Local environment variables
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `DB_HOST` | Yes | — | SQL Server hostname or IP address |
-| `DB_NAME` | Yes | — | Database containing the attendance tables |
-| `DB_USER` | Yes | — | SQL Server login |
-| `DB_PASSWORD` | Yes | — | SQL Server password |
-| `DB_PORT` | No | `1433` | SQL Server port |
+| `DB_CONNECTION_STRING` | Yes | — | Full SQL Server connection string (`Server`, `Database`, `User Id`, `Password`, optional port/`TrustServerCertificate`) |
+| `DATABASE_URL` | No | — | Accepted as an alias when `DB_CONNECTION_STRING` is empty |
 | `TZ_OFFSET_HOURS` | No | `1` | Local time offset from UTC, in whole hours |
 | `PORT` | No | `3000` | Local web server port |
 
@@ -101,4 +138,14 @@ The attendance report (`server/reports/attendance.js`) expects:
 - `dbo.EventHistory`: `PeopleID`, `CardNumber`, `EventCategory`, `EventDescription`, `EventUTCTime`
 - `dbo.p_people`: `PeopleID`, `Firstname`, `Lastname`, `Department`
 
-It filters for granted access events and groups results by person **and local calendar day**. Event times are stored in UTC and shifted by `TZ_OFFSET_HOURS`; the queried UTC window runs from local midnight of the first selected day to local midnight after the last one. In range mode each row also carries its local date for the UI and the exports.
+It filters for granted access events and groups results by person **and local calendar day**. Event times are stored in UTC and shifted by `TZ_OFFSET_HOURS`; the queried UTC window runs from local midnight of the first selected day to local midnight after the last one. In range mode each row also carries its local date for the UI and the exports. The optional ID number filter compares `PeopleID` as text, so it works whether that column is numeric or a GUID.
+
+The SQL is parameterized (`@start`, `@end`, `@tz`, `@idNumber`): no user input, including extra query-string parameters, is ever concatenated into a statement.
+
+## Tests
+
+```bash
+npm test
+```
+
+Covers the shared connection-string configuration (`server/config.js`, `server/env.js`), the report's validation, SQL parameters, columns, subtitles and rows, the Excel/CSV/HTML/PDF exports and the print template, the renderer's report template (URL presets, extra parameters, table and CSV rendering), plus the Express API's 400/401/403/404 behaviour.

@@ -1,5 +1,8 @@
+import {
+  escapeHtml as esc, exportFileName, paramFieldsHtml, resolveReportParams, tableHtml,
+} from "./template.js";
+
 const $ = (s) => document.querySelector(s);
-const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const view = $("#view");
 let token = null, reportList = [];
 
@@ -43,25 +46,34 @@ function homeView() {
 function reportView(id) {
   const r = reportList.find((x) => x.id === id);
   if (!r) return go("reports");
-  const today = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
-  view.innerHTML = `<main>
+  // The report's own template fills in its fields; extra query-string keys travel through.
+  const { values, extra } = resolveReportParams(r);
+  view.innerHTML = `<main class="report">
     <a class="back" href="#/reports">‹ All reports</a>
-    <h1>${esc(r.title)}</h1><p class="muted">${esc(r.description)}</p>
+    <header class="report-head">
+      <div><h1>${esc(r.title)}</h1><p class="muted">${esc(r.description)}</p></div>
+      <div class="report-meta msg" id="m" role="status"></div>
+    </header>
     <form class="toolbar" id="f">
-      ${r.params.map((p) => paramField(p, today)).join("")}
+      ${paramFieldsHtml(r, values)}
       <button class="btn primary">Run report</button>
       <span class="spacer"></span>
-      <button type="button" class="btn" data-x="xlsx" disabled>Export Excel</button>
-      <button type="button" class="btn" data-x="pdf" disabled>Export PDF</button>
+      <button type="button" class="btn" data-x="xlsx" disabled>Excel</button>
+      <button type="button" class="btn" data-x="csv" disabled>CSV</button>
+      <button type="button" class="btn" data-x="pdf" disabled>PDF</button>
     </form>
-    <div class="msg" id="m" role="status"></div>
     <div class="table-wrap hidden" id="out"></div></main>`;
 
   const form = $("#f"), msg = $("#m"), out = $("#out");
   const modeInput = form.elements.mode;
-  const qs = () => new URLSearchParams(new FormData(form)).toString();
-  const values = () => Object.fromEntries(new FormData(form));
-  const setMsg = (t, cls = "") => { msg.textContent = t; msg.className = "msg " + cls; };
+  const valuesNow = () => Object.fromEntries(new FormData(form));
+  // Only the visible fields are submitted; the URL's extra keys are appended untouched.
+  const qs = () => {
+    const params = new URLSearchParams(new FormData(form));
+    for (const { name, value } of extra) params.set(name, value);
+    return params.toString();
+  };
+  const setMsg = (t, cls = "") => { msg.textContent = t; msg.className = "report-meta msg " + cls; };
 
   // Show only the fields for the selected mode; hidden fields are disabled so they are
   // neither validated nor sent, and the server keeps validating whatever arrives.
@@ -76,7 +88,7 @@ function reportView(id) {
   if (modeInput) { modeInput.onchange = syncMode; syncMode(); }
 
   const validate = () => {
-    const v = values();
+    const v = valuesNow();
     if ((v.mode || "single") === "range" && v.start > v.end)
       return "The start date must be on or before the end date.";
     return "";
@@ -91,10 +103,10 @@ function reportView(id) {
     try {
       const { rows, subtitle, columns } = await (await api(`/reports/${id}/data?${qs()}`)).json();
       const cols = columns?.length ? columns : r.columns;
-      const range = (values().mode || "single") === "range";
+      const range = (valuesNow().mode || "single") === "range";
       out.classList.remove("hidden");
       out.innerHTML = rows.length
-        ? table(cols, r.groupBy, rows)
+        ? tableHtml({ columns: cols, groupBy: r.groupBy, rows })
         : `<div class="empty">No records for this ${range ? "date range" : "date"}. Try another ${range ? "range" : "date"}.</div>`;
       setMsg(`${subtitle} · ${rows.length} record${rows.length === 1 ? "" : "s"}`);
       form.querySelectorAll("[data-x]").forEach((b) => (b.disabled = !rows.length));
@@ -106,45 +118,14 @@ function reportView(id) {
     b.disabled = true; b.textContent = "Preparing…";
     try {
       const blob = await (await api(`/reports/${id}/${ext}?${qs()}`)).blob();
-      const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: `${id}-${fileStem(values())}.${ext}` });
+      const a = Object.assign(document.createElement("a"), {
+        href: URL.createObjectURL(blob), download: exportFileName(id, valuesNow(), ext),
+      });
       a.click(); URL.revokeObjectURL(a.href);
-      setMsg(`Saved ${ext === "xlsx" ? "Excel" : "PDF"} file to Downloads.`, "ok");
+      setMsg(`Saved ${label} file to Downloads.`, "ok");
     } catch (err) { setMsg(err.message, "err"); }
     b.disabled = false; b.textContent = label;
   }));
-}
-
-/* Range runs are named for their whole window; single runs for their day. */
-function fileStem(v) {
-  if ((v.mode || "single") === "range") return v.start && v.end ? `${v.start}_to_${v.end}` : "range";
-  return v.date || "report";
-}
-
-function paramField(p, today) {
-  const id = `p_${p.name}`;
-  const mode = p.mode ? ` data-mode="${esc(p.mode)}"` : "";
-  if (p.type === "select") {
-    const options = (p.options || []).map((o) =>
-      `<option value="${esc(o.value)}"${o.value === p.default ? " selected" : ""}>${esc(o.label)}</option>`).join("");
-    return `<div class="field"${mode}><label for="${id}">${esc(p.label)}</label>
-      <select id="${id}" name="${p.name}">${options}</select></div>`;
-  }
-  const type = p.type === "date" ? "date" : p.type === "number" ? "number" : "text";
-  const value = type === "date" ? today : esc(p.default ?? "");
-  return `<div class="field"${mode}><label for="${id}">${esc(p.label)}</label>
-    <input id="${id}" name="${p.name}" type="${type}" value="${value}" required></div>`;
-}
-
-function table(cols, groupBy, rows) {
-  const head = `<thead><tr>${cols.map((c) => `<th class="${c.align || ""}">${esc(c.label)}</th>`).join("")}</tr></thead>`;
-  const line = (row) => `<tr>${cols.map((c) => `<td class="${c.align || ""}">${esc(row[c.key])}</td>`).join("")}</tr>`;
-  let body = "";
-  if (groupBy) {
-    const groups = Map.groupBy(rows, (x) => x[groupBy]);
-    for (const [name, list] of groups)
-      body += `<tr class="grp"><td colspan="${cols.length}">${esc(name)} (${list.length})</td></tr>` + list.map(line).join("");
-  } else body = rows.map(line).join("");
-  return `<table>${head}<tbody>${body}</tbody></table>`;
 }
 
 /* ---------- Router ---------- */

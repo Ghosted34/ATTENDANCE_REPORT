@@ -4,7 +4,7 @@ import { fileURLToPath } from "url";
 import { brand } from "./brand.js";
 import { login, requireAuth } from "./auth.js";
 import { reports } from "./reports/registry.js";
-import { toXlsx, toHtml } from "./reports/export.js";
+import { toCsv, toXlsx, toHtml } from "./reports/export.js";
 import { toPdf } from "./reports/pdf.js";
 
 const web = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "renderer", "app");
@@ -61,10 +61,19 @@ export function createApp({ secret, getConfig, renderPdf }) {
     res.type("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
       .send(await toXlsx(report, rows, params));
   }));
+  api.get("/reports/:id/csv", wrap(async (req, res) => {
+    const { report, params, rows } = await run(req);
+    res.type("text/csv; charset=utf-8")
+      .set("Content-Disposition", `attachment; filename="${report.id}.csv"`)
+      .send(toCsv(report, rows, params));
+  }));
   api.get("/reports/:id/pdf", wrap(async (req, res) => {
     const { report, params, rows } = await run(req);
+    // Electron renders the same HTML template through Chromium's printToPDF, with the
+    // page setup and footer from server/reports/print-template.js.
+    const meta = { title: report.title, subtitle: report.subtitle(params), brandName: brand.name };
     const pdf = renderPdf
-      ? await renderPdf(toHtml(report, rows, params, brand.name))
+      ? await renderPdf(toHtml(report, rows, params, brand.name), meta)
       : await toPdf(report, rows, params, brand.name);
     res.type("application/pdf").send(pdf);
   }));
