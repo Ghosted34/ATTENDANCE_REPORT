@@ -2,8 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import ExcelJS from "exceljs";
 import attendance, {
-  columnsFor, exportColumnsFor, isIsoDate, normalizeParams, rangeDays, subtitle,
+  columnsFor, exportColumnsFor, isIsoDate, normalizeParams, rangeDays, statementFor, subtitle, TEXT_SAFE_STATEMENT,
 } from "../server/reports/attendance.js";
+import { isError241 } from "../server/doctor.js";
 import { columnsOf, toCsv, toHtml, toXlsx } from "../server/reports/export.js";
 import { toPdf } from "../server/reports/pdf.js";
 
@@ -27,9 +28,13 @@ const reportRows = [
     firstEntry: "06:30:00", lastEntry: "18:00:00", duration: "11h 30m", accessCount: 4 },
 ];
 
+// The datetime column a modern installation has: the probe answers, the report returns rows.
 const fakeQuery = () => {
   const calls = [];
-  const queryFn = async (sql, params) => { calls.push({ sql, params }); return dbRows; };
+  const queryFn = async (sql, params) => {
+    calls.push({ sql, params });
+    return /INFORMATION_SCHEMA\.COLUMNS/.test(sql) ? [{ kind: "datetime" }] : dbRows;
+  };
   return { calls, queryFn };
 };
 
@@ -130,27 +135,111 @@ test("subtitle names the day or the range and its length", () => {
 
 /* ---------- Query ---------- */
 
-test("SQL is parameterized and derives the UTC window from the local dates", async () => {
+test("SQL is parameterized and the window is bound as integers, so no date is ever parsed from a string", async () => {
   const { calls, queryFn } = fakeQuery();
   await attendance.run({ mode: "range", start: "2026-10-05", end: "2026-10-07" }, { tz: 1, queryFn });
 
-  assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].params, { start: "2026-10-05", end: "2026-10-07", idNumber: "", tz: 1 });
-  const { sql } = calls[0];
-  assert.match(sql, /@start/);
-  assert.match(sql, /@end/);
+  assert.equal(calls.length, 2); // the column type first, then the report itself
+  const { sql } = calls[1];
+  assert.match(sql, /@startYmd/);
+  assert.match(sql, /@endYmd/);
   assert.match(sql, /@tz/);
   assert.match(sql, /@idNumber/);
   assert.match(sql, /DATEADD\(HOUR, -@tz,/); // UTC window still shifted by the configured offset
-  assert.match(sql, /GROUP BY[\s\S]*CONVERT\(VARCHAR\(10\), DATEADD\(HOUR, @tz, eh\.EventUTCTime\), 23\)/);
+  // Grouped per local day, and the day is produced as zero-padded text: no style code, no parsing.
+  assert.match(sql, /GROUP BY[\s\S]*CONCAT\(RIGHT\('000' \+ CAST\(YEAR\(DATEADD\(HOUR, @tz, eh\.EventUTCTime\)\) AS VARCHAR\(4\)\), 4\)/);
+  assert.doesNotMatch(sql, /CONVERT\(VARCHAR\(10\)|, 23\)/);
   assert.doesNotMatch(sql, /2026-10-05/); // no value is interpolated into the statement
+
+  // The days travel as integers and are rebuilt inside SQL, so there is no character string for
+  // the server to parse: neither CONVERT(...,23) nor SET LANGUAGE/SET DATEFORMAT can raise 241.
+  assert.deepEqual(calls[1].params, { startYmd: 20261005, endYmd: 20261007, idNumber: "", tz: 1 });
+  assert.match(sql, /DATEFROMPARTS\(@startYmd \/ 10000, @startYmd % 10000 \/ 100, @startYmd % 100\)/);
+  assert.match(sql, /DATEFROMPARTS\(@endYmd \/ 10000, @endYmd % 10000 \/ 100, @endYmd % 100\)/);
+  assert.doesNotMatch(sql, /CONVERT\(\s*DATETIME/);
+  assert.doesNotMatch(sql, /TRY_CONVERT\(\s*DATETIME\s*,\s*@/);
+
+  // The UTC window compares the raw column, so an index on it can still be used.
+  assert.match(sql, /AND eh\.EventUTCTime >= @from AND eh\.EventUTCTime < @to/);
+
+  // A single date is the same statement with a one-day window.
+  const single = fakeQuery();
+  await attendance.run({ date: "2026-10-05" }, { tz: 1, queryFn: single.queryFn });
+  assert.deepEqual(single.calls[1].params, { startYmd: 20261005, endYmd: 20261005, idNumber: "", tz: 1 });
 });
 
-test("the optional ID number travels as its own SQL parameter", async () => {
+test("the filters never convert, and the optional ID number travels as its own SQL parameter", async () => {
   const { calls, queryFn } = fakeQuery();
   await attendance.run({ date: "2026-10-05", idNumber: " 7 " }, { tz: 1, queryFn });
-  assert.equal(calls[0].params.idNumber, "7");
-  assert.match(calls[0].sql, /CONVERT\(VARCHAR\(64\), eh\.PeopleID\) = @idNumber/);
+  const { sql } = calls[1];
+  assert.equal(calls[1].params.idNumber, "7"); // trimmed, still a bound parameter
+  assert.match(sql, /LTRIM\(RTRIM\(CONVERT\(VARCHAR\(64\), eh\.PeopleID\)\)\) = @idNumber/);
+  assert.match(sql, /TRY_CONVERT\(int, eh\.EventCategory\) = 10001/);
+  assert.match(sql, /LTRIM\(RTRIM\(CONVERT\(VARCHAR\(64\), eh\.CardNumber\)\)\) <> '0'/);
+  assert.doesNotMatch(sql, /eh\.EventCategory = 10001/); // the bare compare would fail on a text column
+});
+
+// Runs the report with a chosen answer for the column-type lookup (null = the column is not in
+// the catalog at all, "boom" = the lookup itself fails) and hands back the queries it issued.
+const runWithColumnType = async (type) => {
+  const calls = [];
+  const queryFn = async (sql, params) => {
+    calls.push({ sql, params });
+    if (/INFORMATION_SCHEMA\.COLUMNS/.test(sql)) {
+      if (type === "boom") throw new Error("permission denied on INFORMATION_SCHEMA.COLUMNS");
+      return type === null ? [] : [{ kind: type }];
+    }
+    return dbRows;
+  };
+  await attendance.run({ date: "2026-10-05" }, { tz: 1, queryFn });
+  return calls;
+};
+
+test("the statement matches the type of the time column: plain column for a real date/time, TRY_CONVERT for text", async () => {
+  // A real date/time column is read as it is, so the index on it stays usable.
+  const typed = (await runWithColumnType("datetime"))[1];
+  assert.match(typed.sql, /AND eh\.EventUTCTime >= @from/);
+  assert.equal(typed.sql.includes("TRY_CONVERT(datetime2(3), eh.EventUTCTime)"), false);
+  assert.match(typed.sql, /CONCAT\(RIGHT\('000' \+ CAST\(YEAR\(DATEADD\(HOUR, @tz, eh\.EventUTCTime\)\)/);
+
+  // A legacy text column is read through TRY_CONVERT, which skips unparsable values instead of
+  // failing the whole run, and the window compares the parsed value, never a raw string.
+  const text = (await runWithColumnType("nvarchar"))[1];
+  assert.equal(text.sql, statementFor("text"));
+  assert.match(text.sql, />= @from/);
+  assert.match(text.sql, /TRY_CONVERT\(datetime2\(3\), eh\.EventUTCTime\)/);
+
+  // The lookup is asked once per run, not once per person or per day.
+  assert.equal((await runWithColumnType("datetime")).filter((c) => /INFORMATION_SCHEMA/.test(c.sql)).length, 1);
+});
+
+test("an unknown, missing or unreadable column type falls back to the text-safe statement", async () => {
+  for (const [label, type] of [["unknown type", "uniqueidentifier"], ["no such column", null], ["a failing lookup", "boom"]]) {
+    const calls = await runWithColumnType(type);
+    assert.equal(calls[1].sql, TEXT_SAFE_STATEMENT, label);
+    assert.deepEqual(calls[1].params, { startYmd: 20261005, endYmd: 20261005, idNumber: "", tz: 1 }, label);
+  }
+});
+
+test("a 241 is rethrown with a pointer at npm run doctor, and other errors are left alone", async () => {
+  const failWith = (error) => attendance.run({ date: "2026-10-05" }, {
+    tz: 1,
+    queryFn: async (sql) => {
+      if (/INFORMATION_SCHEMA\.COLUMNS/.test(sql)) return [{ kind: "datetime" }];
+      throw error;
+    },
+  });
+
+  const conversion = Object.assign(new Error("Conversion failed when converting date and/or time from character string."), { number: 241 });
+  const err = await failWith(conversion).catch((e) => e);
+  assert.match(err.message, /npm run doctor/);
+  assert.match(err.hint, /npm run doctor/);
+  assert.equal(err.number, 241); // the server's own code survives, so callers can still branch on it
+
+  const timeout = Object.assign(new Error("Timeout: Request failed to complete"), { code: "ETIMEDOUT" });
+  assert.equal(await failWith(timeout).catch((e) => e), timeout);
+  assert.equal(isError241(timeout), false);
+  assert.equal(isError241(conversion), true);
 });
 
 test("rows keep one entry per person per local day and carry the date and department", async () => {

@@ -80,7 +80,7 @@ The report form has a **Report for** choice:
 
 **ID number** (optional) limits a run to one person. It matches `dbo.EventHistory.PeopleID` exactly; leave it blank for everyone.
 
-Both modes use the same parameterized SQL, the same `TZ_OFFSET_HOURS` shift, and the same one-row-per-person-per-local-day grouping; a single date is simply a one-day range. Invalid dates (for example `2026-02-31`), ranges whose start is after the end, and ID numbers containing anything but letters, digits, dashes or underscores are refused in the browser and by the API with HTTP `400`, so exports cannot be produced from bad input either.
+Both modes use the same parameterized SQL, the same `TZ_OFFSET_HOURS` shift, and the same one-row-per-person-per-local-day grouping; a single date is simply a one-day range. Invalid dates (for example `2026-02-31`), ranges whose start is after the end, and ID numbers containing anything but letters, digits, dashes or underscores are refused in the browser and by the API with HTTP `400`, so exports cannot be produced from bad input either. A database-side date conversion failure (`SQL Server error 241`) points at `npm run doctor`, which explains which column or row is responsible — see **If a report fails with error 241**.
 
 The toolbar's query string is the whole API contract, and both browser and Electron mode use it:
 
@@ -140,7 +140,19 @@ The attendance report (`server/reports/attendance.js`) expects:
 
 It filters for granted access events and groups results by person **and local calendar day**. Event times are stored in UTC and shifted by `TZ_OFFSET_HOURS`; the queried UTC window runs from local midnight of the first selected day to local midnight after the last one. In range mode each row also carries its local date for the UI and the exports. The optional ID number filter compares `PeopleID` as text, so it works whether that column is numeric or a GUID.
 
-The SQL is parameterized (`@start`, `@end`, `@tz`, `@idNumber`): no user input, including extra query-string parameters, is ever concatenated into a statement.
+`EventUTCTime` may be a real date/time column (`date`, `datetime`, `smalldatetime`, `datetime2`) or a legacy character column. The report reads its declared type from the catalog once per run and uses the matching statement: the plain column, so the index on it stays usable, or `TRY_CONVERT(datetime2(3), eh.EventUTCTime)`, which skips rows whose text cannot be parsed instead of failing the whole report. An unknown or unreadable type falls back to the text-safe statement.
+
+The SQL is parameterized (`@startYmd`, `@endYmd`, `@tz`, `@idNumber`): no user input, including extra query-string parameters, is ever concatenated into a statement. The two dates travel as **integers** (`20261005`) and are rebuilt inside SQL with `DATEFROMPARTS`, and the category and card filters use `TRY_CONVERT`/trimmed text compares, so nothing in the run ever asks SQL Server to read a date from a character string — the source of error 241, and the part that `SET LANGUAGE`/`SET DATEFORMAT` could break.
+
+## If a report fails with error 241
+
+```bash
+npm run doctor
+```
+
+`server/doctor.js` is a read-only diagnosis for exactly that case. It prints the connection string with the password masked, the column types the database *actually* has for every column the report reads, the time column's range and a few samples, the rows whose text cannot be read as a date/time (with examples and counts), and a dry run of the report over the last 7 whole local days through the normal code path. Exits non-zero when something is wrong; each line says which check failed.
+
+It sends nothing but `SELECT`s, looks up only the columns listed under **Database expectations** (they are matched against the catalog, never interpolated), and never prints the password. It reads `.env` like the local server does; Electron keeps its settings in its own encrypted store, so run it from a terminal with a `.env` for the same database.
 
 ## Tests
 
@@ -148,4 +160,4 @@ The SQL is parameterized (`@start`, `@end`, `@tz`, `@idNumber`): no user input, 
 npm test
 ```
 
-Covers the shared connection-string configuration (`server/config.js`, `server/env.js`), the report's validation, SQL parameters, columns, subtitles and rows, the Excel/CSV/HTML/PDF exports and the print template, the renderer's report template (URL presets, extra parameters, table and CSV rendering), plus the Express API's 400/401/403/404 behaviour.
+Covers the shared connection-string configuration (`server/config.js`, `server/env.js`), the report's validation, its integer window and statement selection (including the text-safe fallback), columns, subtitles and rows, the Excel/CSV/HTML/PDF exports and the print template, the renderer's report template (URL presets, extra parameters, table and CSV rendering), the doctor's checks, its identifier allowlist and the 241 hint, plus the Express API's 400/401/403/404 behaviour. No external services are needed: every test runs against an injected query function, so a plain `npm install` is enough.
