@@ -2,9 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import ExcelJS from "exceljs";
 import attendance, {
-  columnsFor, exportColumnsFor, isIsoDate, normalizeParams, rangeDays, statementFor, subtitle, TEXT_SAFE_STATEMENT,
+  columnsFor, exportColumnsFor, isIsoDate, normalizeParams, rangeDays, readEventTimeType, statementFor, subtitle, TEXT_SAFE_STATEMENT,
 } from "../server/reports/attendance.js";
-import { isError241 } from "../server/doctor.js";
+import { classifyColumn, isDateShapeError, isError241 } from "../server/doctor.js";
 import { columnsOf, toCsv, toHtml, toXlsx } from "../server/reports/export.js";
 import { toPdf } from "../server/reports/pdf.js";
 
@@ -47,6 +47,65 @@ const headersOf = (ws, rowNumber) => {
   const headers = [];
   ws.getRow(rowNumber).eachCell((cell) => headers.push(cell.value));
   return headers;
+};
+
+/** Split the argument list of generated SQL function calls without confusing nested calls. */
+const functionCalls = (sql, name) => {
+  const calls = [];
+  const matcher = new RegExp(`\\b${name}\\s*\\(`, "gi");
+  let match;
+  while ((match = matcher.exec(sql))) {
+    const open = sql.indexOf("(", match.index);
+    const args = [];
+    let depth = 0;
+    let inString = false;
+    let argStart = open + 1;
+    let closed = false;
+    for (let i = open + 1; i < sql.length; i += 1) {
+      const char = sql[i];
+      if (inString) {
+        if (char === "'" && sql[i + 1] === "'") { i += 1; continue; }
+        if (char === "'") inString = false;
+        continue;
+      }
+      if (char === "'") { inString = true; continue; }
+      if (char === "(") { depth += 1; continue; }
+      if (char === ")") {
+        if (depth > 0) { depth -= 1; continue; }
+        args.push(sql.slice(argStart, i).trim());
+        closed = true;
+        break;
+      }
+      if (char === "," && depth === 0) {
+        args.push(sql.slice(argStart, i).trim());
+        argStart = i + 1;
+      }
+    }
+    assert.equal(closed, true, `unclosed ${name}( call`);
+    calls.push(args);
+  }
+  return calls;
+};
+
+const assertBalancedSql = (sql) => {
+  let depth = 0;
+  let inString = false;
+  for (let i = 0; i < sql.length; i += 1) {
+    const char = sql[i];
+    if (inString) {
+      if (char === "'" && sql[i + 1] === "'") { i += 1; continue; }
+      if (char === "'") inString = false;
+      continue;
+    }
+    if (char === "'") { inString = true; continue; }
+    if (char === "(" ) depth += 1;
+    if (char === ")") {
+      depth -= 1;
+      assert.ok(depth >= 0, "SQL closed a parenthesis before opening it");
+    }
+  }
+  assert.equal(depth, 0, "SQL must have balanced parentheses");
+  assert.equal(inString, false, "SQL must have balanced string quotes");
 };
 
 /* ---------- Validation ---------- */
@@ -154,8 +213,8 @@ test("SQL is parameterized and the window is bound as integers, so no date is ev
   // The days travel as integers and are rebuilt inside SQL, so there is no character string for
   // the server to parse: neither CONVERT(...,23) nor SET LANGUAGE/SET DATEFORMAT can raise 241.
   assert.deepEqual(calls[1].params, { startYmd: 20261005, endYmd: 20261007, idNumber: "", tz: 1 });
-  assert.match(sql, /DATEFROMPARTS\(@startYmd \/ 10000, @startYmd % 10000 \/ 100, @startYmd % 100\)/);
-  assert.match(sql, /DATEFROMPARTS\(@endYmd \/ 10000, @endYmd % 10000 \/ 100, @endYmd % 100\)/);
+  assert.match(sql, /DATETIMEFROMPARTS\(@startYmd \/ 10000, @startYmd % 10000 \/ 100, @startYmd % 100, 0, 0, 0, 0\)/);
+  assert.match(sql, /DATETIMEFROMPARTS\(@endYmd \/ 10000, @endYmd % 10000 \/ 100, @endYmd % 100, 0, 0, 0, 0\)/);
   assert.doesNotMatch(sql, /CONVERT\(\s*DATETIME/);
   assert.doesNotMatch(sql, /TRY_CONVERT\(\s*DATETIME\s*,\s*@/);
 
@@ -166,6 +225,43 @@ test("SQL is parameterized and the window is bound as integers, so no date is ev
   const single = fakeQuery();
   await attendance.run({ date: "2026-10-05" }, { tz: 1, queryFn: single.queryFn });
   assert.deepEqual(single.calls[1].params, { startYmd: 20261005, endYmd: 20261005, idNumber: "", tz: 1 });
+});
+
+test("both SQL variants build time-capable windows with documented function arities", () => {
+  const variants = [
+    { kind: "datetime", sql: statementFor("datetime"), builder: "DATETIMEFROMPARTS", arity: 7 },
+    { kind: "text", sql: statementFor("text"), builder: "DATETIME2FROMPARTS", arity: 8 },
+  ];
+
+  for (const { kind, sql, builder, arity } of variants) {
+    assertBalancedSql(sql);
+    if (kind === "datetime") {
+      assert.match(sql, /DECLARE @from DATETIME = DATEADD\(HOUR, -@tz, DATETIMEFROMPARTS\(/);
+      assert.match(sql, /DECLARE @to\s+DATETIME = DATEADD\(DAY, 1, DATEADD\(HOUR, -@tz, DATETIMEFROMPARTS\(/);
+    } else {
+      assert.match(sql, /DECLARE @from DATETIME2\(3\) = DATEADD\(HOUR, -@tz, DATETIME2FROMPARTS\(/);
+      assert.match(sql, /DECLARE @to\s+DATETIME2\(3\) = DATEADD\(DAY, 1, DATEADD\(HOUR, -@tz, DATETIME2FROMPARTS\(/);
+    }
+
+    // Each window boundary is built twice (start and end) with the documented SQL Server arity.
+    const builderCalls = functionCalls(sql, builder);
+    assert.equal(builderCalls.length, 2, kind);
+    assert.ok(builderCalls.every((args) => args.length === arity), `${builder} must take ${arity} arguments`);
+    assert.equal(functionCalls(sql, "DATEFROMPARTS").length, 0, "a date-only value cannot be shifted by HOUR");
+
+    // Every HOUR/MINUTE/SECOND DATEADD must receive a type that carries time: the matching
+    // window builder, a TRY_CONVERT(datetime2(3)), or the plain date/time column variant.
+    const timeAdds = functionCalls(sql, "DATEADD").filter(([datepart]) => /^(HOUR|MINUTE|SECOND)$/i.test(datepart));
+    assert.ok(timeAdds.length > 0, `${kind} has time DATEADD expressions`);
+    const timeBearingExpression = kind === "datetime"
+      ? /^(?:DATETIMEFROMPARTS|eh\.EventUTCTime\b)/i
+      : /^(?:DATETIME2FROMPARTS|TRY_CONVERT\s*\(\s*datetime2)/i;
+    for (const [, , dateArgument] of timeAdds) {
+      assert.doesNotMatch(dateArgument, /^(?:DATEFROMPARTS\s*\(|CAST\s*\([\s\S]*?\s+AS\s+DATE\s*\)|CONVERT\s*\(\s*DATE\b)/i);
+      assert.match(dateArgument, timeBearingExpression,
+        `time DATEADD must use a time-bearing ${kind} expression, got: ${dateArgument}`);
+    }
+  }
 });
 
 test("the filters never convert, and the optional ID number travels as its own SQL parameter", async () => {
@@ -195,8 +291,8 @@ const runWithColumnType = async (type) => {
   return calls;
 };
 
-test("the statement matches the type of the time column: plain column for a real date/time, TRY_CONVERT for text", async () => {
-  // A real date/time column is read as it is, so the index on it stays usable.
+test("the statement matches the type of the time column: plain for time-bearing types, TRY_CONVERT for text", async () => {
+  // A real datetime column is read as it is, so the index on it stays usable.
   const typed = (await runWithColumnType("datetime"))[1];
   assert.match(typed.sql, /AND eh\.EventUTCTime >= @from/);
   assert.equal(typed.sql.includes("TRY_CONVERT(datetime2(3), eh.EventUTCTime)"), false);
@@ -206,8 +302,19 @@ test("the statement matches the type of the time column: plain column for a real
   // failing the whole run, and the window compares the parsed value, never a raw string.
   const text = (await runWithColumnType("nvarchar"))[1];
   assert.equal(text.sql, statementFor("text"));
-  assert.match(text.sql, />= @from/);
+  assert.match(text.sql, /AND TRY_CONVERT\(datetime2\(3\), eh\.EventUTCTime\) >= @from/);
+  assert.doesNotMatch(text.sql, /AND eh\.EventUTCTime >= @from/);
   assert.match(text.sql, /TRY_CONVERT\(datetime2\(3\), eh\.EventUTCTime\)/);
+
+  // DATE is date-only, so the doctor classifies it separately and the report must use the
+  // text-safe datetime2 expression rather than DATEADD(HOUR, ..., EventUTCTime).
+  assert.equal(classifyColumn("date"), "date");
+  assert.equal(await readEventTimeType(async () => [{ kind: "date" }]), "date");
+  const dateOnly = (await runWithColumnType("date"))[1];
+  assert.equal(dateOnly.sql, TEXT_SAFE_STATEMENT);
+  assert.match(dateOnly.sql, /AND TRY_CONVERT\(datetime2\(3\), eh\.EventUTCTime\) >= @from/);
+  assert.match(dateOnly.sql, /DECLARE @from DATETIME2\(3\) = DATEADD\(HOUR, -@tz, DATETIME2FROMPARTS/);
+  assert.doesNotMatch(dateOnly.sql, /AND eh\.EventUTCTime >= @from/);
 
   // The lookup is asked once per run, not once per person or per day.
   assert.equal((await runWithColumnType("datetime")).filter((c) => /INFORMATION_SCHEMA/.test(c.sql)).length, 1);
@@ -221,7 +328,7 @@ test("an unknown, missing or unreadable column type falls back to the text-safe 
   }
 });
 
-test("a 241 is rethrown with a pointer at npm run doctor, and other errors are left alone", async () => {
+test("SQL date-shape errors 241, 242 and 9810 get the doctor hint without losing driver fields", async () => {
   const failWith = (error) => attendance.run({ date: "2026-10-05" }, {
     tz: 1,
     queryFn: async (sql) => {
@@ -230,16 +337,27 @@ test("a 241 is rethrown with a pointer at npm run doctor, and other errors are l
     },
   });
 
-  const conversion = Object.assign(new Error("Conversion failed when converting date and/or time from character string."), { number: 241 });
-  const err = await failWith(conversion).catch((e) => e);
-  assert.match(err.message, /npm run doctor/);
-  assert.match(err.hint, /npm run doctor/);
-  assert.equal(err.number, 241); // the server's own code survives, so callers can still branch on it
+  const dateErrors = [
+    Object.assign(new Error("Conversion failed when converting date and/or time from character string."), { number: 241, code: "EREQUEST" }),
+    Object.assign(new Error("The conversion of a varchar data type to a datetime data type resulted in an out-of-range value."), { number: 242, code: "EREQUEST" }),
+    Object.assign(new Error("The datepart hour is not supported by date function dateadd for data type date."), { number: 9810, code: "EREQUEST" }),
+  ];
+  for (const original of dateErrors) {
+    const err = await failWith(original).catch((e) => e);
+    assert.equal(err, original); // same driver error object, not a wrapper that drops its fields
+    assert.match(err.message, /npm run doctor/);
+    assert.match(err.hint, /npm run doctor/);
+    assert.equal(err.number, original.number);
+    assert.equal(err.code, original.code);
+    assert.equal(isDateShapeError(err), true);
+    assert.equal(isError241(err), original.number === 241);
+  }
+  assert.match(dateErrors[2].hint, /9810/);
 
   const timeout = Object.assign(new Error("Timeout: Request failed to complete"), { code: "ETIMEDOUT" });
   assert.equal(await failWith(timeout).catch((e) => e), timeout);
+  assert.equal(isDateShapeError(timeout), false);
   assert.equal(isError241(timeout), false);
-  assert.equal(isError241(conversion), true);
 });
 
 test("rows keep one entry per person per local day and carry the date and department", async () => {

@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  buildDoctorReport, classifyColumn, columnTypeSql, isError241, isAllowedIdentifier,
-  lastNDays, unparseableSql, withError241Hint,
+  buildDoctorReport, classifyColumn, columnTypeSql, isDateShapeError, isError241, isAllowedIdentifier,
+  lastNDays, unparseableSql, withDateShapeHint, withError241Hint,
 } from "../server/doctor.js";
 
 const CONFIG = {
@@ -23,6 +23,7 @@ const DATETIME_TYPES = [
 ];
 
 const TEXT_TYPES = DATETIME_TYPES.map((r) => (r.name === "EventUTCTime" ? { ...r, type: "varchar" } : r));
+const DATE_TYPES = DATETIME_TYPES.map((r) => (r.name === "EventUTCTime" ? { ...r, type: "date" } : r));
 
 const attendanceRow = {
   LocalDate: "2026-10-01", PeopleID: 7, Firstname: "Ada", Lastname: "Obi", Department: "Ops",
@@ -38,6 +39,10 @@ const fakeDb = ({ types = DATETIME_TYPES, stats = {}, samples = [], bad = [], re
   const calls = [];
   const queryFn = async (sql, params) => {
     calls.push({ sql, params });
+    if (/INFORMATION_SCHEMA\.COLUMNS/.test(sql)) {
+      const eventTime = types.find((row) => row.tbl === "EventHistory" && row.name === "EventUTCTime");
+      return eventTime ? [{ kind: eventTime.type }] : [];
+    }
     if (/sys\.tables/.test(sql)) {
       if (typeProbeError) throw typeProbeError;
       return types;
@@ -126,6 +131,38 @@ test("a healthy datetime column leaves nothing to fix, and a failing dry run is 
   assert.ok(failing.report.problems >= 3, failing.text);
 });
 
+test("a date-only EventUTCTime uses the safe statement and explains its zero-duration limitation", async () => {
+  const db = fakeDb({
+    types: DATE_TYPES,
+    stats: { ReadableRows: 12, MinTime: new Date("2026-10-01T00:00:00Z"), MaxTime: new Date("2026-10-04T00:00:00Z"), OutOfRange: 0 },
+    samples: [{ SampleTime: new Date("2026-10-01T00:00:00Z") }],
+    reportRows: [attendanceRow],
+  });
+  const { report, text } = await capture({ config: CONFIG, queryFn: db.queryFn, today: TODAY });
+
+  assert.equal(classifyColumn("date"), "date");
+  assert.equal(report.problems, 0, text);
+  assert.match(text, /EventUTCTime date/);
+  assert.match(text, /Statement\s+reads the date-only EventUTCTime through TRY_CONVERT\(datetime2\(3\), …\) so DATEADD\(HOUR, …\) has a time-capable type/);
+  assert.match(text, /all stored entry times are midnight and DATEDIFF\(MINUTE, …\) is always 0, so duration and last-entry fields display as —/);
+  assert.match(text, /Unparseable\s+not applicable: EventUTCTime is a native date column, not character data/);
+
+  // The doctor never asks the character-value diagnostic to RTRIM a native date. The dry run
+  // goes through the same datetime2-safe variant the report uses for a date-only column.
+  assert.equal(db.calls.some((call) => /BadValue/.test(call.sql)), false);
+  const reportSql = db.calls.find((call) => /EventCategory/.test(call.sql));
+  assert.match(reportSql.sql, /DECLARE @from DATETIME2\(3\) = DATEADD\(HOUR, -@tz, DATETIME2FROMPARTS/);
+  assert.match(reportSql.sql, /TRY_CONVERT\(datetime2\(3\), eh\.EventUTCTime\) >= @from/);
+  assert.match(reportSql.sql, /DATEDIFF\(MINUTE, MIN\(TRY_CONVERT\(datetime2\(3\), eh\.EventUTCTime\)\), MAX\(TRY_CONVERT\(datetime2\(3\), eh\.EventUTCTime\)\)\)/);
+
+  const diagnostics = db.calls.filter((call) => /ReadableRows|SampleTime/.test(call.sql));
+  assert.equal(diagnostics.length, 2);
+  for (const { sql } of diagnostics) {
+    assert.doesNotMatch(sql, /DATEADD\s*\(\s*(?:HOUR|MINUTE|SECOND)\s*,/i);
+  }
+  assert.doesNotMatch(unparseableSql("date"), /DATEADD\s*\(\s*(?:HOUR|MINUTE|SECOND)\s*,/i);
+});
+
 /* ---------- the statements and the checks ---------- */
 
 test("every statement is parameterized and only ever looks at the whitelisted identifiers", () => {
@@ -145,9 +182,10 @@ test("every statement is parameterized and only ever looks at the whitelisted id
   assert.match(unparseableSql("ntext"), /CONVERT\(VARCHAR\(MAX\), eh\.EventUTCTime\)/); // LOB columns need a cast
 });
 
-test("the doctor classifies types, names error 241, and dry-runs whole local days", async () => {
+test("the doctor classifies types, names date-shape errors, and dry-runs whole local days", async () => {
   assert.equal(classifyColumn("datetime2"), "datetime");
   assert.equal(classifyColumn("DATETIME"), "datetime");
+  assert.equal(classifyColumn("date"), "date");
   assert.equal(classifyColumn("varchar"), "text");
   assert.equal(classifyColumn("char"), "text");
   assert.equal(classifyColumn("uniqueidentifier"), "unknown");
@@ -160,6 +198,18 @@ test("the doctor classifies types, names error 241, and dry-runs whole local day
   assert.equal(isError241(new Error("Timeout expired")), false);
   assert.equal(isError241({ message: "Invalid column name 'EventUTCTime'." }), false); // a 208, not a 241
   assert.equal(isError241(undefined), false);
+
+  assert.equal(isDateShapeError({ message: "Microsoft SQL Server: Error 242: out of range" }), true);
+  assert.equal(isDateShapeError({ message: "RequestError number: 9810, datepart hour is unsupported for date" }), true);
+  assert.equal(isDateShapeError(new Error("Timeout expired")), false);
+  const unsupported = Object.assign(new Error("The datepart hour is not supported by date function dateadd for data type date."), {
+    number: 9810, code: "EREQUEST",
+  });
+  const shapeHinted = withDateShapeHint(unsupported);
+  assert.match(shapeHinted.message, /SQL Server error 9810/);
+  assert.match(shapeHinted.hint, /npm run doctor/);
+  assert.equal(shapeHinted.number, 9810);
+  assert.equal(shapeHinted.code, "EREQUEST");
 
   const hinted = withError241Hint(new Error("Msg 241, Level 16"));
   assert.match(hinted.message, /npm run doctor/);
