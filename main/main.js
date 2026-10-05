@@ -74,8 +74,9 @@ function buildMenu() {
 ipcMain.handle("settings:get", () => {
   const c = store.load();
   return c
-    ? { ...c, password: "", hasPassword: true }
-    : { host: "", port: "1433", user: "", password: "", database: "", tzOffsetHours: 1, hasPassword: false };
+    ? { ...c, password: "", hasPassword: Boolean(c.password), source: store.source() }
+    : { host: "", port: "1433", user: "", password: "", database: "", tzOffsetHours: 1,
+        hasPassword: false, source: store.source() };
 });
 
 ipcMain.handle("settings:save", async (_e, v) => {

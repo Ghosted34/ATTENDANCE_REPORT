@@ -4,7 +4,21 @@
   "private": true,
   "type": "module",
   "main": "main/main.js",
-  "scripts": { "start": "electron .", "dist": "electron-builder --win" },
-  "dependencies": { "exceljs": "^4.4.0", "express": "^4.21.0", "mssql": "^11.0.0" },
-  "devDependencies": { "electron": "^33.0.0", "electron-builder": "^25.0.0" }
+  "scripts": {
+    "start": "electron .",
+    "dev": "nodemon",
+    "serve": "node server/start.js",
+    "dist": "electron-builder --win"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.5",
+    "exceljs": "^4.4.0",
+    "express": "^4.21.0",
+    "mssql": "^11.0.0"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0",
+    "nodemon": "^3.1.14"
+  }
 }

@@ -1,0 +1,6 @@
+{
+  "watch": ["server", "brand.json", ".env"],
+  "ext": "js,json",
+  "ignore": ["node_modules/**", "dist/**", "logs/**", "uploads/**", ".git/**"],
+  "exec": "node server/start.js"
+}

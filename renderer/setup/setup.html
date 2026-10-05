@@ -4,7 +4,7 @@
 <body>
 <form class="settings" id="f" autocomplete="off">
   <h1>Database settings</h1>
-  <p class="muted" style="margin-bottom:1.25rem">We test the connection before saving. The password is stored encrypted on this computer.</p>
+  <p class="muted" style="margin-bottom:1.25rem">We test the connection before saving. <span id="where">The password is stored encrypted on this computer.</span></p>
   <div class="row">
     <div class="field"><label for="host">Server</label><input id="host" placeholder="192.168.1.10 or SERVER\SQLEXPRESS" required></div>
     <div class="field"><label for="port">Port</label><input id="port" type="number" min="1" max="65535" required></div>
@@ -28,6 +28,8 @@
     keys.forEach((k) => ($(k).value = s[k] ?? ""));
     if (s.hasPassword) $("password").placeholder = "Leave blank to keep the current password";
     else $("password").required = true;
+    if (s.source === "env")
+      $("where").textContent = "These settings come from the .env file in the project root and are saved back to it.";
   });
   $("cancel").onclick = () => window.close();
   $("f").onsubmit = async (e) => {
