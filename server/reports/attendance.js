@@ -1,5 +1,5 @@
 import { query } from "../db/pool.js";
-import { classifyColumn, EVENT_COLUMNS, isError241, PEOPLE_COLUMNS, withError241Hint } from "../doctor.js";
+import { classifyColumn, EVENT_COLUMNS, isDateShapeError, PEOPLE_COLUMNS, withDateShapeHint } from "../doctor.js";
 
 /**
  * Times are stored in UTC. @tz shifts them to local time, and the UTC window is derived from
@@ -10,9 +10,10 @@ import { classifyColumn, EVENT_COLUMNS, isError241, PEOPLE_COLUMNS, withError241
  * could not be parsed") is the reason this query looks the way it does:
  *
  *  1. The window never travels as a date *string*. The days are bound as integers
- *     (@startYmd/@endYmd, e.g. 20261005) and rebuilt inside SQL with DATEFROMPARTS, so no
- *     date format, no SET LANGUAGE/DATEFORMAT and no collation of the session can decide
- *     how a literal is read.
+ *     (@startYmd/@endYmd, e.g. 20261005) and rebuilt inside SQL with a typed *FROMPARTS
+ *     function, so no date format, no SET LANGUAGE/DATEFORMAT and no collation of the
+ *     session can decide how a literal is read. The datetime column gets a DATETIME window;
+ *     the text-safe expression gets a DATETIME2(3) window.
  *  2. EventHistory.EventUTCTime is a real date/time column on newer installs and legacy text
  *     on older ones. The type is read once per run from INFORMATION_SCHEMA.COLUMNS and only the
  *     matching statement is used; the text variant reads the column with TRY_CONVERT, which
@@ -123,13 +124,24 @@ const clockExpr = (timeExpr) =>
 
 /**
  * The one statement template, built from two expressions: `time` reads EventUTCTime in local
- * time (for the day and the clock columns) and `timeUtc` reads it in UTC. The window and the
- * aggregates use `timeUtc`, i.e. the column itself for a date/time column, so the index on it
- * can still be used; `time` is only ever the same value shifted by the constant @tz.
+ * time (for the day and the clock columns) and `timeUtc` reads it in UTC. For time-bearing
+ * columns, `timeUtc` is the raw column in the window predicate, so its index can still be used;
+ * text and date-only columns use TRY_CONVERT(datetime2(3)) instead. `time` is the same value
+ * shifted by the constant @tz.
  */
-const template = (time, timeUtc) => `
-DECLARE @from DATETIME2(3) = DATEADD(HOUR, -@tz, DATEFROMPARTS(@startYmd / 10000, @startYmd % 10000 / 100, @startYmd % 100));
-DECLARE @to   DATETIME2(3) = DATEADD(DAY, 1, DATEADD(HOUR, -@tz, DATEFROMPARTS(@endYmd / 10000, @endYmd % 10000 / 100, @endYmd % 100)));
+const ymdParts = (parameter) =>
+  `${parameter} / 10000, ${parameter} % 10000 / 100, ${parameter} % 100`;
+
+// These signatures and return types are from SQL Server 2012+ Transact-SQL documentation:
+// DATETIMEFROMPARTS takes 7 arguments and returns datetime; DATETIME2FROMPARTS takes 8 and
+// returns datetime2(precision). Unlike DATEFROMPARTS, both builders carry a time component, so
+// DATEADD(HOUR, ...) is legal and preserves the type needed by the window comparison.
+const datetimeMidnight = (parameter) => `DATETIMEFROMPARTS(${ymdParts(parameter)}, 0, 0, 0, 0)`;
+const datetime2Midnight = (parameter) => `DATETIME2FROMPARTS(${ymdParts(parameter)}, 0, 0, 0, 0, 3)`;
+
+const template = (time, timeUtc, windowType, midnightFor) => `
+DECLARE @from ${windowType} = DATEADD(HOUR, -@tz, ${midnightFor("@startYmd")});
+DECLARE @to   ${windowType} = DATEADD(DAY, 1, DATEADD(HOUR, -@tz, ${midnightFor("@endYmd")}));
 
 SELECT
   eh.PeopleID, pp.Firstname, pp.Lastname, pp.Department,
@@ -149,12 +161,19 @@ WHERE TRY_CONVERT(int, eh.EventCategory) = 10001
   AND (@idNumber = '' OR LTRIM(RTRIM(CONVERT(VARCHAR(64), eh.PeopleID))) = @idNumber)
 GROUP BY eh.PeopleID, pp.Firstname, pp.Lastname, pp.Department, ${localDayExpr(time)};`;
 
-/** Real date/time column: read it as it is. Legacy text: TRY_CONVERT, which skips unparseable rows. */
+/** Time-bearing datetime column: preserve its raw value for index-friendly comparisons. */
 export const statementFor = (kind) => (kind === "datetime"
-  ? template("DATEADD(HOUR, @tz, eh.EventUTCTime)", "eh.EventUTCTime")
+  ? template(
+    "DATEADD(HOUR, @tz, eh.EventUTCTime)",
+    "eh.EventUTCTime",
+    "DATETIME",
+    datetimeMidnight,
+  )
   : template(
     "DATEADD(HOUR, @tz, TRY_CONVERT(datetime2(3), eh.EventUTCTime))",
     "TRY_CONVERT(datetime2(3), eh.EventUTCTime)",
+    "DATETIME2(3)",
+    datetime2Midnight,
   ));
 
 /** The statement used when the column type could not be read: the text-safe one, never fatal. */
@@ -189,9 +208,9 @@ async function run(params, { tz, queryFn = query } = {}) {
   try {
     rows = await queryFn(sql, values);
   } catch (error) {
-    // The window is built from integers and the column is read by type, so a 241 here means the
-    // database is not shaped as the report was configured for. Say so, and point at the doctor.
-    throw isError241(error) ? withError241Hint(error) : error;
+    // Date-shape errors (241 conversion, 242 range, 9810 unsupported datepart) are actionable
+    // through the read-only doctor. Keep the driver's number/code fields on the same error object.
+    throw isDateShapeError(error) ? withDateShapeHint(error) : error;
   }
   return rows
     .map((r) => {

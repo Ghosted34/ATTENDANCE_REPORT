@@ -6,8 +6,8 @@ import { query } from "./db/pool.js";
 
 /**
  * `npm run doctor` — a read-only explanation of why the attendance report fails, for the
- * SQL Server error 241 family in particular ("conversion of a character string to a date/time
- * produced an out-of-range or unparsable value").
+ * SQL Server date-shape errors (241 conversion, 242 out-of-range, and 9810 unsupported datepart
+ * for a date-only type) in particular.
  *
  * It prints the masked connection string, the real column types, the time column's range and a
  * few samples, the rows whose text cannot be read as a date/time, and a 7-day report dry run.
@@ -32,16 +32,18 @@ export const EVENT_COLUMNS = Object.freeze(["PeopleID", "CardNumber", "EventCate
 export const PEOPLE_COLUMNS = Object.freeze(["PeopleID", "Firstname", "Lastname", "Department"]);
 
 /** Column types as declared in the catalog, grouped the way the report needs them. */
-const DATETIME_TYPES = new Set(["datetime", "datetime2", "smalldatetime", "date"]);
+const DATETIME_TYPES = new Set(["datetime", "datetime2", "smalldatetime"]);
 const TEXT_TYPES = new Set(["varchar", "nvarchar", "char", "nchar", "text", "ntext"]);
 
 /**
- * "datetime" for a real date/time column, "text" for a character column, "missing" when the
- * lookup returned nothing and "unknown" for a type the report does not know (treated as text).
+ * "datetime" for a real date/time column, "date" for a date-only column that must take the
+ * datetime2 text-safe path, "text" for a character column, "missing" when the lookup returned
+ * nothing and "unknown" for a type the report does not know (treated as text).
  */
 export function classifyColumn(type) {
   const name = String(type ?? "").toLowerCase().trim();
   if (!name) return "missing";
+  if (name === "date") return "date";
   if (DATETIME_TYPES.has(name)) return "datetime";
   if (TEXT_TYPES.has(name)) return "text";
   return "unknown";
@@ -96,31 +98,73 @@ GROUP BY CONVERT(VARCHAR(255), ${text})
 ORDER BY COUNT(*) DESC;`;
 }
 
-/* ---------- error 241 ---------- */
+/* ---------- SQL Server date-shape errors ---------- */
+
+const DATE_SHAPE_ERROR_NUMBERS = new Set([241, 242, 9810]);
+const DATE_SHAPE_ERROR_DETAILS = new Map([
+  [241, "a date/time value could not be read"],
+  [242, "a date/time value is outside the supported range"],
+  [9810, "DATEADD used a datepart that the value's SQL type does not support"],
+]);
+const DOCTOR_POINTER = "Run `npm run doctor` to see the real column types, date/time samples, rows that fail to parse, and a report dry run.";
 
 /**
- * True for SQL Server error 241 (a character string that could not be read as date/time).
- * Reads the server's own number when the driver exposes it and falls back to the message,
- * because not every driver version keeps `number`.
+ * Read a SQL Server date-shape error number from the driver's `number` field or, for older
+ * driver shapes, from its message. The original `number` and `code` fields are never rewritten.
  */
-export function isError241(error) {
-  if (!error || typeof error !== "object") return false;
-  if (error.number === 241) return true;
+function dateShapeErrorNumber(error) {
+  if (!error || typeof error !== "object") return null;
+  const number = Number(error.number);
+  if (DATE_SHAPE_ERROR_NUMBERS.has(number)) return number;
+
   const message = String(error.message ?? "");
-  // "Msg 241, Level 16, …" or "…SQL Server: Error 241: …": the server naming the number is
-  // conclusive on its own, and drivers truncate messages, so no second keyword is required.
-  if (/\b(?:error|msg)\s*:?\s*241\b/i.test(message)) return true;
-  // A bare 241 is only trusted when it comes with the conversion wording.
-  return /\b241\b/.test(message) && /conversion|datetime/i.test(message);
+  const explicit = message.match(/\b(?:error|msg|number|code)\s*:?\s*(241|242|9810)\b/i);
+  if (explicit) return Number(explicit[1]);
+
+  // Some wrappers retain the SQL number in prose without a label. Require date/time-specific
+  // wording so an unrelated message that happens to mention 241/242/9810 isn't decorated.
+  const bare = message.match(/\b(241|242|9810)\b/);
+  if (!bare) return null;
+  const candidate = Number(bare[1]);
+  if (candidate === 241 && /conversion|datetime/i.test(message)) return candidate;
+  if (candidate === 242 && /date|time|range|overflow|conversion/i.test(message)) return candidate;
+  if (candidate === 9810 && /dateadd|datepart|date function|data type|unsupported/i.test(message)) return candidate;
+  return null;
 }
 
-/** The same error with a pointer at `npm run doctor`, so the message is actionable. */
-export function withError241Hint(error) {
+/** True for SQL Server error 241 (unparseable conversion), including older message-only drivers. */
+export function isError241(error) {
+  return dateShapeErrorNumber(error) === 241;
+}
+
+/** True for date-shape errors: 241 conversion, 242 out of range, or 9810 unsupported datepart. */
+export function isDateShapeError(error) {
+  return dateShapeErrorNumber(error) !== null;
+}
+
+function addHint(error, hint) {
   const err = error instanceof Error ? error : new Error(String(error?.message ?? error));
-  err.hint = "SQL Server error 241: a date/time value in the database could not be read. " +
-    "Run `npm run doctor` to see the real column types, the rows that fail to parse, and a report dry run.";
-  err.message = `${err.message} ${err.hint}`;
+  if (err !== error && error && typeof error === "object") {
+    // Keep the SQL Server/driver fields available to API callers even for non-Error wrappers.
+    for (const field of ["number", "code"]) {
+      if (error[field] !== undefined) err[field] = error[field];
+    }
+  }
+  err.hint = hint;
+  if (!String(err.message).includes(hint)) err.message = `${err.message} ${hint}`;
   return err;
+}
+
+/** The date-shape error with the same read-only `npm run doctor` pointer. */
+export function withDateShapeHint(error) {
+  const number = dateShapeErrorNumber(error);
+  const detail = DATE_SHAPE_ERROR_DETAILS.get(number) ?? "a SQL Server date/time value or type is not valid";
+  return addHint(error, `SQL Server${number ? ` error ${number}` : " date/time error"}: ${detail}. ${DOCTOR_POINTER}`);
+}
+
+/** Backwards-compatible 241-specific helper for callers and tests. */
+export function withError241Hint(error) {
+  return addHint(error, `SQL Server error 241: ${DATE_SHAPE_ERROR_DETAILS.get(241)}. ${DOCTOR_POINTER}`);
 }
 
 /* ---------- statements the report needs, derived from the column types ---------- */
@@ -137,9 +181,8 @@ WHERE s.name = 'dbo' AND ((st.name = @eventTable AND sc.name IN (@c0, @c1, @c2, 
 ORDER BY st.name, sc.column_id;`;
 
 /**
- * Range and samples for the time column, read the way the report reads it. The bounds are built
- * with DATEFROMPARTS rather than written as a date literal, so even this diagnostic never asks
- * SQL Server to parse a character string as a date.
+ * Range and samples for the time column, read the way the report reads it. DATEFROMPARTS builds
+ * comparison bounds only here (it is never passed to DATEADD), and no date literal is parsed.
  */
 const rangeSql = (timeExpr) => `
 SELECT COUNT(${timeExpr}) AS ReadableRows,
@@ -219,6 +262,9 @@ export async function buildDoctorReport({ config, queryFn = query, today = new D
   const kind = classifyColumn(declaredType);
   if (kind === "datetime") {
     line("Statement", `reads ${TIME_COLUMN} as a ${typeLabel} column: the plain column, so the index on it is still usable.`);
+  } else if (kind === "date") {
+    note("Statement", `reads the date-only ${TIME_COLUMN} through TRY_CONVERT(datetime2(3), …) so DATEADD(HOUR, …) has a time-capable type. ` +
+      "A date column has no time-of-day: all stored entry times are midnight and DATEDIFF(MINUTE, …) is always 0, so duration and last-entry fields display as —. Use a time-bearing column if durations are needed.");
   } else if (kind === "text") {
     line("Statement", `reads ${TIME_COLUMN} (a ${typeLabel} column) through TRY_CONVERT(datetime2(3), …): ` +
       "values that cannot be parsed are skipped instead of failing the report.");
@@ -264,6 +310,8 @@ export async function buildDoctorReport({ config, queryFn = query, today = new D
     } catch (error) {
       fail("Unparseable", `the check could not run: ${error.message}`);
     }
+  } else if (kind === "date") {
+    line("Unparseable", `not applicable: ${TIME_COLUMN} is a native date column, not character data.`);
   } else {
     line("Unparseable", `not applicable: ${TIME_COLUMN} is a date/time column, so nothing is parsed from it.`);
   }
@@ -275,6 +323,7 @@ export async function buildDoctorReport({ config, queryFn = query, today = new D
   } else {
     fail("Dry run", `the last 7 days (${dry.start}..${dry.end}) failed: ${dry.error}`);
     if (dry.error241) fail("", "error 241 confirmed — it is a data problem, not a parameter one: start with the type above, then the bad rows.");
+    else if (dry.errorDateShape) fail("", `SQL Server date-shape error${dry.errorNumber ? ` ${dry.errorNumber}` : ""} confirmed — start with the column type and the report statement above.`);
   }
   return report;
 }
@@ -290,7 +339,15 @@ async function dryRunReport({ config, queryFn, today }) {
     const rows = await attendance.run({ mode: "range", start, end }, { tz: config.tzOffsetHours, queryFn });
     return { ok: true, start, end, rows: rows.length };
   } catch (error) {
-    return { ok: false, start, end, error: error.message, error241: isError241(error) };
+    return {
+      ok: false,
+      start,
+      end,
+      error: error.message,
+      error241: isError241(error),
+      errorDateShape: isDateShapeError(error),
+      errorNumber: error.number,
+    };
   }
 }
 
