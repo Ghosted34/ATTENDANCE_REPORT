@@ -4,7 +4,7 @@ import { fileURLToPath } from "url";
 import { brand } from "./brand.js";
 import { login, requireAuth } from "./auth.js";
 import { reports } from "./reports/registry.js";
-import { toXlsx, toHtml } from "./reports/export.js";
+import { toCsv, toXlsx, toHtml } from "./reports/export.js";
 import { toPdf } from "./reports/pdf.js";
 
 const web = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "renderer", "app");
@@ -44,24 +44,36 @@ export function createApp({ secret, getConfig, renderPdf }) {
   const run = async (req) => {
     const report = reports.get(req.params.id);
     if (!report) throw Object.assign(new Error("Unknown report."), { status: 404 });
-    const params = Object.fromEntries(report.params.map((p) => [p.name, String(req.query[p.name] ?? "")]));
+    const raw = Object.fromEntries(report.params.map((p) => [p.name, String(req.query[p.name] ?? "")]));
+    // Reports own their validation so bad dates/ranges fail with a clear 400 before SQL runs.
+    const params = report.normalize ? report.normalize(raw) : raw;
     const rows = await report.run(params, { tz: getConfig().tzOffsetHours });
-    return { report, params, rows };
+    const columns = report.columnsFor ? report.columnsFor(params) : report.columns;
+    return { report, params, columns, rows };
   };
 
   api.get("/reports/:id/data", wrap(async (req, res) => {
-    const { rows, report, params } = await run(req);
-    res.json({ rows, subtitle: report.subtitle(params) });
+    const { rows, report, params, columns } = await run(req);
+    res.json({ rows, subtitle: report.subtitle(params), columns });
   }));
   api.get("/reports/:id/xlsx", wrap(async (req, res) => {
     const { report, params, rows } = await run(req);
     res.type("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
       .send(await toXlsx(report, rows, params));
   }));
+  api.get("/reports/:id/csv", wrap(async (req, res) => {
+    const { report, params, rows } = await run(req);
+    res.type("text/csv; charset=utf-8")
+      .set("Content-Disposition", `attachment; filename="${report.id}.csv"`)
+      .send(toCsv(report, rows, params));
+  }));
   api.get("/reports/:id/pdf", wrap(async (req, res) => {
     const { report, params, rows } = await run(req);
+    // Electron renders the same HTML template through Chromium's printToPDF, with the
+    // page setup and footer from server/reports/print-template.js.
+    const meta = { title: report.title, subtitle: report.subtitle(params), brandName: brand.name };
     const pdf = renderPdf
-      ? await renderPdf(toHtml(report, rows, params, brand.name))
+      ? await renderPdf(toHtml(report, rows, params, brand.name), meta)
       : await toPdf(report, rows, params, brand.name);
     res.type("application/pdf").send(pdf);
   }));

@@ -1,6 +1,7 @@
 import dotenv from "dotenv";
 import { brand } from "./brand.js";
 import { configure, testConnection } from "./db/pool.js";
+import { describeConnection } from "./config.js";
 import { ENV_FILE, readEnvConfig } from "./env.js";
 import { startServer, stopServer } from "./index.js";
 
@@ -28,8 +29,8 @@ async function main() {
   const config = readEnvConfig();
   if (!config) {
     throw new Error(
-      `No complete local database configuration. Copy .env.example to .env and fill in ` +
-      "DB_HOST, DB_NAME, DB_USER, and DB_PASSWORD.",
+      "No local database configuration. Copy .env.example to .env and fill in " +
+      "DB_CONNECTION_STRING with the SQL Server connection string.",
     );
   }
 
@@ -47,7 +48,7 @@ async function main() {
   );
   console.log(`${brand.name} — local browser mode`);
   console.log(`  UI       http://127.0.0.1:${actualPort}`);
-  console.log(`  Database ${config.host},${config.port} — ${config.database} as ${config.user}`);
+  console.log(`  Database ${describeConnection(config)}`);
   console.log(`  Config   ${ENV_FILE} (UTC offset ${config.tzOffsetHours}h)`);
   console.log("  Sign in  admin / admin (mock login)");
   console.log("  Bound to 127.0.0.1 only. Press Ctrl+C to stop.");

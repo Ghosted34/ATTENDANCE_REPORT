@@ -6,7 +6,8 @@ import * as store from "./config-store.js";
 import { startServer, stopServer } from "../server/index.js";
 import { testConnection, configure, getPool } from "../server/db/pool.js";
 import { brand } from "../server/brand.js";
-import { normalizeDatabaseConfig } from "../server/config.js";
+import { maskConnectionString, normalizeDatabaseConfig } from "../server/config.js";
+import { printOptions } from "../server/reports/print-template.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ui = (...p) => path.join(here, "..", "renderer", ...p);
@@ -52,11 +53,11 @@ function createMainWindow(port) {
   mainWin.on("closed", () => app.quit());
 }
 
-async function renderPdf(html) {
+async function renderPdf(html, meta) {
   const w = new BrowserWindow({ show: false });
   try {
     await w.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
-    return await w.webContents.printToPDF({ pageSize: "A4", printBackground: true });
+    return await w.webContents.printToPDF(printOptions(meta));
   } finally { w.destroy(); }
 }
 
@@ -75,19 +76,16 @@ function buildMenu() {
 ipcMain.handle("settings:get", () => {
   const c = store.load();
   return c
-    ? { ...c, password: "", hasPassword: true }
-    : { host: "", port: "1433", user: "", password: "", database: "", tzOffsetHours: 1, hasPassword: false };
+    ? { connectionString: "", storedConnection: maskConnectionString(c.connectionString), tzOffsetHours: c.tzOffsetHours }
+    : { connectionString: "", storedConnection: "", tzOffsetHours: 1 };
 });
 
 ipcMain.handle("settings:save", async (_e, v) => {
   try {
     const old = store.load();
     const cfg = normalizeDatabaseConfig({
-      host: v.host,
-      port: v.port,
-      user: v.user,
-      password: v.password || old?.password || "",
-      database: v.database,
+      // Leaving the box empty keeps the saved string (the window never receives the password).
+      connectionString: String(v.connectionString ?? "").trim() || old?.connectionString || "",
       tzOffsetHours: v.tzOffsetHours,
     });
     await testConnection(cfg);       // save only if it connects

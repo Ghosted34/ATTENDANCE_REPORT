@@ -2,12 +2,16 @@ import mssql from "mssql";
 
 let cfg = null, pool = null;
 
-const make = (c) => new mssql.ConnectionPool({
-  user: c.user, password: c.password, server: c.host, port: Number(c.port), database: c.database,
-  connectionTimeout: 5000, requestTimeout: 30000,
-  options: { trustServerCertificate: true, enableArithAbort: true },
-  pool: { max: 10, min: 0, idleTimeoutMillis: 30000 },
-});
+// The connection string is split once here, then the app's timeouts are applied on top of it.
+const make = (c) => {
+  const parsed = mssql.ConnectionPool.parseConnectionString(c.connectionString);
+  return new mssql.ConnectionPool({
+    ...parsed,
+    connectionTimeout: 5000, requestTimeout: 30000,
+    options: { trustServerCertificate: true, enableArithAbort: true, ...parsed.options },
+    pool: { max: 10, min: 0, idleTimeoutMillis: 30000 },
+  });
+};
 
 export async function testConnection(c) {
   const p = make(c);
