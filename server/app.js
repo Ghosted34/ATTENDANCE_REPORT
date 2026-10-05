@@ -14,9 +14,13 @@ export function createApp({ secret, getConfig, renderPdf }) {
   app.disable("x-powered-by");
   app.use(express.json());
 
-  // Only this app's windows (which carry the per-launch secret) may talk to the server.
-  app.use((req, res, next) =>
-    req.headers["x-app-token"] === secret ? next() : res.status(403).end());
+  // In the desktop app every window carries a per-launch secret, injected by Electron.
+  // With no secret configured — the browser dev server — the API is open, so that server
+  // must stay bound to loopback (see server/start.js).
+  if (secret) {
+    app.use((req, res, next) =>
+      req.headers["x-app-token"] === secret ? next() : res.status(403).end());
+  }
 
   app.get("/api/live", (_req, res) => res.json({ ok: true }));
   app.get("/api/meta", (_req, res) => res.json({ name: brand.name }));
@@ -52,6 +56,8 @@ export function createApp({ secret, getConfig, renderPdf }) {
       .send(await toXlsx(report, rows, params));
   }));
   api.get("/reports/:id/pdf", wrap(async (req, res) => {
+    if (!renderPdf) return res.status(501)
+      .json({ error: "PDF export needs the desktop app. Use Export Excel here." });
     const { report, params, rows } = await run(req);
     res.type("application/pdf").send(await renderPdf(toHtml(report, rows, params, brand.name)));
   }));
