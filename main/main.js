@@ -7,7 +7,7 @@ import { startServer, stopServer } from "../server/index.js";
 import { testConnection, configure, getPool } from "../server/db/pool.js";
 import { brand } from "../server/brand.js";
 import { maskConnectionString, normalizeDatabaseConfig } from "../server/config.js";
-import { printOptions } from "../server/reports/print-template.js";
+import { printHtmlToPdf } from "./print-report.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ui = (...p) => path.join(here, "..", "renderer", ...p);
@@ -53,11 +53,21 @@ function createMainWindow(port) {
   mainWin.on("closed", () => app.quit());
 }
 
+/**
+ * Prints a report to PDF in a hidden window. The HTML goes through a temporary file rather than a
+ * `data:` URL, which cannot carry a full report (see main/print-report.js), and the file is
+ * deleted before this resolves. Page setup and footer come from the print template.
+ */
 async function renderPdf(html, meta) {
   const w = new BrowserWindow({ show: false });
   try {
-    await w.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
-    return await w.webContents.printToPDF(printOptions(meta));
+    return await printHtmlToPdf({
+      html,
+      meta,
+      tmpRoot: app.getPath("temp"),
+      loadFile: (file) => w.loadFile(file),
+      printToPDF: (options) => w.webContents.printToPDF(options),
+    });
   } finally { w.destroy(); }
 }
 
