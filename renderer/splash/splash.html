@@ -1,17 +1,27 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Starting…</title>
-<link rel="stylesheet" href="../app/css/styles.css"><script src="../app/js/theme.js"></script></head>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Starting\u2026</title>
+  <link rel="stylesheet" href="../app/css/styles.css" />
+  <script src="../app/js/theme.js"></script>
+</head>
 <body>
   <div class="splash">
     <h1 id="brand">&nbsp;</h1>
-    <div class="progress" role="progressbar"><i id="bar"></i></div>
-    <p class="muted" id="text">Starting…</p>
+    <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+      <i id="bar" aria-valuenow="0"></i>
+    </div>
+    <p class="muted" id="text">Starting\u2026</p>
   </div>
   <script>
     window.bridge.onStatus(({ text, pct, brand }) => {
       document.getElementById("brand").textContent = brand;
-      document.getElementById("text").textContent = text + "…";
-      document.getElementById("bar").style.width = pct + "%";
+      document.getElementById("text").textContent = text + "\u2026";
+      const bar = document.getElementById("bar");
+      bar.style.width = pct + "%";
+      bar.setAttribute("aria-valuenow", pct);
     });
   </script>
-</body></html>
+</body>
+</html>

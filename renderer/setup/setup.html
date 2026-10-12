@@ -1,47 +1,76 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Database settings</title>
-<link rel="stylesheet" href="../app/css/styles.css"><script src="../app/js/theme.js"></script></head>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Database settings</title>
+  <link rel="stylesheet" href="../app/css/styles.css" />
+  <script src="../app/js/theme.js"></script>
+</head>
 <body>
-<form class="settings" id="f" autocomplete="off">
-  <h1>Database settings</h1>
-  <p class="muted" style="margin-bottom:1.25rem">We test the connection before saving. The connection string is stored encrypted on this computer.</p>
-  <div class="field">
-    <label for="connectionString">Connection string</label>
-    <textarea id="connectionString" rows="4" spellcheck="false"
-      placeholder="Server=192.168.1.10,1433;Database=VIAC;User Id=reports;Password=…;TrustServerCertificate=True"></textarea>
-    <p class="hint" id="stored"></p>
-  </div>
-  <div class="field"><label for="tzOffsetHours">Hours ahead of UTC</label>
-    <input id="tzOffsetHours" type="number" min="-12" max="14" step="1" required>
-    <p class="hint">Event times are stored in UTC. Use 1 for Nigeria.</p></div>
-  <div class="msg" id="m" role="alert"></div>
-  <div class="actions">
-    <button type="button" class="btn" id="cancel">Cancel</button>
-    <button class="btn primary" id="save">Test and save</button>
-  </div>
-</form>
-<script>
-  const $ = (id) => document.getElementById(id);
-  let hasStored = false;
-  bridge.getSettings().then((s) => {
-    $("tzOffsetHours").value = s.tzOffsetHours ?? 1;
-    hasStored = Boolean(s.storedConnection);
-    $("stored").textContent = hasStored
-      ? `Saved: ${s.storedConnection} — leave the box empty to keep it.`
-      : "Nothing saved yet. Paste the full connection string.";
-  });
-  $("cancel").onclick = () => window.close();
-  $("f").onsubmit = async (e) => {
-    e.preventDefault();
-    const m = $("m"), btn = $("save");
-    const connectionString = $("connectionString").value.trim();
-    if (!connectionString && !hasStored) {
-      m.className = "msg err"; m.textContent = "Paste the database connection string."; return;
-    }
-    btn.disabled = true; btn.textContent = "Testing connection…"; m.className = "msg"; m.textContent = "";
-    const res = await bridge.saveSettings({ connectionString, tzOffsetHours: $("tzOffsetHours").value });
-    if (res.ok) { m.className = "msg ok"; m.textContent = "Connected and saved."; btn.textContent = "Saved"; }
-    else { m.className = "msg err"; m.textContent = res.error; btn.disabled = false; btn.textContent = "Test and save"; }
-  };
-</script>
-</body></html>
+  <form class="settings" id="f" autocomplete="off">
+    <h1>Database settings</h1>
+    <p class="muted">We test the connection before saving. The connection string is stored encrypted on this computer.</p>
+
+    <div class="field">
+      <label for="connectionString">Connection string</label>
+      <textarea id="connectionString" rows="4" spellcheck="false"
+        placeholder="Server=192.168.1.10,1433;Database=VIAC;User Id=reports;Password=\u2026;TrustServerCertificate=True"></textarea>
+      <p class="hint" id="stored"></p>
+    </div>
+
+    <div class="field">
+      <label for="tzOffsetHours">Hours ahead of UTC</label>
+      <input id="tzOffsetHours" type="number" min="-12" max="14" step="1" required>
+      <p class="hint">Event times are stored in UTC. Use 1 for Nigeria.</p>
+    </div>
+
+    <div class="msg" id="m" role="alert"></div>
+
+    <div class="actions">
+      <button type="button" class="btn quiet" id="cancel">Cancel</button>
+      <button class="btn primary" id="save">Test and save</button>
+    </div>
+  </form>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let hasStored = false;
+    bridge.getSettings().then((s) => {
+      $("tzOffsetHours").value = s.tzOffsetHours ?? 1;
+      hasStored = Boolean(s.storedConnection);
+      $("stored").textContent = hasStored
+        ? `Saved: ${s.storedConnection} \u2014 leave the box empty to keep it.`
+        : "Nothing saved yet. Paste the full connection string.";
+    });
+
+    $("cancel").onclick = () => window.close();
+
+    $("f").onsubmit = async (e) => {
+      e.preventDefault();
+      const m = $("m"), btn = $("save");
+      const connectionString = $("connectionString").value.trim();
+      if (!connectionString && !hasStored) {
+        m.className = "msg err";
+        m.textContent = "Paste the database connection string.";
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = "Testing connection\u2026";
+      m.className = "msg";
+      m.textContent = "";
+      const res = await bridge.saveSettings({ connectionString, tzOffsetHours: $("tzOffsetHours").value });
+      if (res.ok) {
+        m.className = "msg ok";
+        m.textContent = "Connected and saved.";
+        btn.textContent = "Saved";
+      }
+      else {
+        m.className = "msg err";
+        m.textContent = res.error;
+        btn.disabled = false;
+        btn.textContent = "Test and save";
+      }
+    };
+  </script>
+</body>
+</html>

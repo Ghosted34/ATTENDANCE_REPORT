@@ -28,12 +28,21 @@ export function footerTemplate({ title = "", subtitle = "", brandName = "" } = {
 
 /** Options for Electron's `webContents.printToPDF`, i.e. the desktop half of the template. */
 export function printOptions(meta = {}, { landscape = PRINT_PAGE.landscape } = {}) {
+  // Electron's printToPDF expects margins in inches when marginType is 'custom'
+  // PRINT_PAGE.marginsPx are in pixels, so convert to inches (96 DPI)
+  const pxToInches = (px) => px / 96;
   return {
     landscape,
     pageSize: PRINT_PAGE.size,
     printBackground: true,
     displayHeaderFooter: true,
-    margins: { marginType: "custom", ...PRINT_PAGE.marginsPx },
+    margins: {
+      marginType: "custom",
+      top: pxToInches(PRINT_PAGE.marginsPx.top),
+      right: pxToInches(PRINT_PAGE.marginsPx.right),
+      bottom: pxToInches(PRINT_PAGE.marginsPx.bottom),
+      left: pxToInches(PRINT_PAGE.marginsPx.left)
+    },
     footerTemplate: footerTemplate(meta),
   };
 }

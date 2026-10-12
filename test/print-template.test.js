@@ -19,7 +19,14 @@ test("printOptions drives Chromium's printToPDF from the template", () => {
   assert.equal(options.landscape, true);
   assert.equal(options.printBackground, true);
   assert.equal(options.displayHeaderFooter, true);
-  assert.deepEqual(options.margins, { marginType: "custom", top: 34, right: 34, bottom: 44, left: 34 });
+  // Margins are in inches (converted from pixels at 96 DPI): 34px ≈ 0.3542in, 44px ≈ 0.4583in
+  assert.deepEqual(options.margins, {
+    marginType: "custom",
+    top: 34 / 96,
+    right: 34 / 96,
+    bottom: 44 / 96,
+    left: 34 / 96
+  });
   assert.match(options.footerTemplate, /Daily attendance — Attendance for 2026-10-05/);
   assert.match(options.footerTemplate, /Reports Desk · Page <span class="pageNumber"><\/span> of <span class="totalPages"><\/span>/);
 });

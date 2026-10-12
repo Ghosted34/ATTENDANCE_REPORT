@@ -93,11 +93,24 @@ export function paramFieldsHtml(report, values = {}) {
   }).join("");
 }
 
+/** Default status pill renderer - can be overridden by caller */
+export function defaultStatusPill(status) {
+  const label = escapeHtml(status);
+  return label;
+}
+
 /** The results table: sticky head, group headings, right-aligned and wrapping cells. */
-export function tableHtml({ columns, groupBy, rows }) {
-  const cells = (row, tag) => columns.map((c) =>
-    `<${tag} class="${cellClass(c)}">${escapeHtml(row[c.key])}</${tag}>`).join("");
-  const head = `<thead><tr>${columns.map((c) => `<th class="${cellClass(c)}">${escapeHtml(c.label)}</th>`).join("")}</tr></thead>`;
+export function tableHtml({ columns, groupBy, rows, statusPill = defaultStatusPill }) {
+  const cells = (row, tag) => columns.map((c) => {
+    let value = row[c.key];
+    // Apply status pill to status column if a custom renderer is provided
+    if (c.key === "status" && statusPill !== defaultStatusPill) {
+      value = statusPill(value);
+    }
+    return `<${tag} class="${cellClass(c)}">${value}</${tag}>`;
+  }).join("");
+
+  const head = `<thead><tr>${columns.map((c) => `<th scope="col" class="${cellClass(c)}">${escapeHtml(c.label)}</th>`).join("")}</tr></thead>`;
   const line = (row) => `<tr>${cells(row, "td")}</tr>`;
   let body = "";
   if (groupBy) {
@@ -110,7 +123,11 @@ export function tableHtml({ columns, groupBy, rows }) {
   } else {
     body = rows.map(line).join("");
   }
-  return `<table>${head}<tbody>${body}</tbody></table>`;
+
+  // Add caption for accessibility
+  const caption = groupBy ? `Report grouped by ${Array.isArray(groupBy) ? groupBy.join(" and ") : groupBy}` : "Report";
+
+  return `<table aria-label="${caption}"><caption class="sr-only">${caption}</caption>${head}<tbody>${body}</tbody></table>`;
 }
 
 /** Joins the parts of a composite heading ("Front Desk — Present"), matching server/reports/export.js. */
