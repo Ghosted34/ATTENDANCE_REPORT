@@ -334,11 +334,28 @@ WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'EventHistory' AND COLUMN_NAME = 'Ev
  * filter matches pp.EmployeeID (or pp.PeopleID when that column is absent) as trimmed text, the
  * same bound parameter as the swipe statement. PeopleID is still selected: it is the match key.
  */
-export function rosterSqlFor(identity = "EmployeeID") {
+export function rosterSqlFor(identity = "EmployeeID", timeKind = "datetime") {
   const badge = identityExpr(identity);
+  // One seek per active person: OUTER APPLY reads each person's latest granted, non-zero card on
+  // EventHistory and selects it as card.CardNumber. The apply does not change who is eligible
+  // (TRY_CONVERT(int, pp.IsActive) = 1) or how the badge filter is bound; it only adds the known
+  // card so an absent day can still show one. A legacy text time column is read through
+  // TRY_CONVERT(datetime2(3), …) so it cannot raise 241 — the same rule the swipe query uses.
+  const orderBy = timeKind === "datetime"
+    ? "eh.EventUTCTime DESC"
+    : "TRY_CONVERT(datetime2(3), eh.EventUTCTime) DESC";
   return `
-SELECT pp.PeopleID, ${badgeSelect(identity)}, pp.Firstname, pp.Lastname, pp.Department
+SELECT pp.PeopleID, ${badgeSelect(identity)}, pp.Firstname, pp.Lastname, pp.Department, card.CardNumber
 FROM dbo.p_people AS pp
+OUTER APPLY (
+  SELECT TOP (1) eh.CardNumber
+  FROM dbo.EventHistory AS eh
+  WHERE eh.PeopleID = pp.PeopleID
+    AND TRY_CONVERT(int, eh.EventCategory) = 10001
+    AND eh.EventDescription = N'Access Granted'
+    AND eh.CardNumber IS NOT NULL AND LTRIM(RTRIM(CONVERT(VARCHAR(64), eh.CardNumber))) <> '0'
+  ORDER BY ${orderBy}
+) AS card
 WHERE TRY_CONVERT(int, pp.IsActive) = 1
   AND (@idNumber = '' OR LTRIM(RTRIM(CONVERT(VARCHAR(64), ${badge}))) = @idNumber);`;
 }
@@ -450,6 +467,18 @@ const displayId = (value) => {
   return typeof value === "string" ? text : value;
 };
 
+/**
+ * A card worth showing: non-null, non-blank, and not "0" after trim. A blank or zero card is no
+ * card at all, so the caller falls back to "—". The raw value is kept (a number stays a number)
+ * so exports and the screen agree on its shape.
+ */
+const usableCard = (value) => {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  if (!text || text === "0") return null;
+  return value;
+};
+
 const nameOf = (row) => [row.Lastname, row.Firstname].filter(Boolean).join(" ") || "Unknown";
 
 /**
@@ -471,7 +500,7 @@ export function absentRows({ start, end, today, roster, presentKeys, skipWeekend
         name: person.name,
         idNumber: person.idNumber,
         department: person.department,
-        cardNumber: "—",
+        cardNumber: person.cardNumber ?? "—",
         firstEntry: "—",
         lastEntry: "—",
         duration: "—",
@@ -523,23 +552,24 @@ export async function runPeriod(params, { tz, queryFn = query, now = new Date() 
   const values = { startYmd: toYmd(start), endYmd: toYmd(end), idNumber: idNumber ?? "", tz };
 
   const swipes = await guard(() => queryFn(statementFor(timeKind, identity), values));
-  const people = await guard(() => queryFn(rosterSqlFor(identity), { idNumber: idNumber ?? "" }));
+  const people = await guard(() => queryFn(rosterSqlFor(identity, timeKind), { idNumber: idNumber ?? "" }));
 
   // Absence matches on PeopleID, never on the displayed badge: a blank badge ("—") must not
   // collapse two people into one, and a badge number is not the key the roster shares.
   const presentKeys = new Set();
-  const present = swipes.map((r) => {
+  const presentRaw = swipes.map((r) => {
     const single = r.DurationMin === 0; // one swipe: no check-out to show
     const date = r.LocalDate ?? start;
     const key = personKey(r.PeopleID);
     if (key) presentKeys.add(`${key}|${date}`);
     return {
+      key,
       date,
       day: weekdayOf(date),
       name: nameOf(r),
-      idNumber: displayId(r.EmployeeID),
+      swipeCard: usableCard(r.CardNumber),
+      rawId: r.EmployeeID,
       department: r.Department || "Unassigned",
-      cardNumber: r.CardNumber,
       firstEntry: r.FirstEntry,
       lastEntry: single ? "—" : r.LastEntry,
       duration: single ? "—" : `${Math.floor(r.DurationMin / 60)}h ${String(r.DurationMin % 60).padStart(2, "0")}m`,
@@ -548,6 +578,12 @@ export async function runPeriod(params, { tz, queryFn = query, now = new Date() 
     };
   });
 
+  // The roster query now carries each person's known card (read with OUTER APPLY) as CardNumber.
+  // The badge and card a person shows are resolved once, here, in memory and after the two queries
+  // that already ran, so present and absent rows for the same PeopleID always agree: a blank roster
+  // badge is filled from a swipe of the same PeopleID in this run, and a blank roster card from any
+  // card seen on a granted swipe this run. Nothing is invented — if neither exists, the badge is "—"
+  // and the card "—".
   const byKey = new Map();
   for (const person of people) {
     const key = personKey(person.PeopleID);
@@ -555,16 +591,63 @@ export async function runPeriod(params, { tz, queryFn = query, now = new Date() 
       byKey.set(key, {
         key,
         name: nameOf(person),
-        idNumber: displayId(person.EmployeeID),
+        rosterId: displayId(person.EmployeeID),
         department: person.Department || "Unassigned",
+        knownCard: usableCard(person.CardNumber),
       });
     }
   }
+
+  // Cards and badges already seen on granted swipes this run, used only to fill a blank roster value.
+  const seenCard = new Map();
+  const seenId = new Map();
+  for (const row of presentRaw) {
+    if (row.key && row.swipeCard) seenCard.set(row.key, seenCard.get(row.key) ?? row.swipeCard);
+    const swipeId = displayId(row.rawId);
+    if (row.key && swipeId !== "—") seenId.set(row.key, seenId.get(row.key) ?? swipeId);
+  }
+
+  // The badge and card for a PeopleID: the roster value when it is present, otherwise a value already
+  // seen on a swipe of the same person this run.
+  const knownIdFor = (key) => {
+    const roster = byKey.get(key);
+    if (roster && roster.rosterId !== "—") return roster.rosterId;
+    return seenId.get(key) ?? (roster ? roster.rosterId : "—");
+  };
+  const knownCardFor = (key) => {
+    const roster = byKey.get(key);
+    if (roster && roster.knownCard) return roster.knownCard;
+    const seen = seenCard.get(key);
+    if (seen) return seen;
+    return "—";
+  };
+
+  const present = presentRaw.map((row) => ({
+    date: row.date,
+    day: row.day,
+    name: row.name,
+    idNumber: row.key ? knownIdFor(row.key) : displayId(row.rawId),
+    department: row.department,
+    cardNumber: row.swipeCard ?? (row.key ? knownCardFor(row.key) : "—"),
+    firstEntry: row.firstEntry,
+    lastEntry: row.lastEntry,
+    duration: row.duration,
+    accessCount: row.accessCount,
+    status: row.status,
+  }));
+
+  const roster = [...byKey.values()].map((person) => ({
+    key: person.key,
+    name: person.name,
+    idNumber: knownIdFor(person.key),
+    department: person.department,
+    cardNumber: knownCardFor(person.key),
+  }));
   const absent = absentRows({
     start,
     end,
     today: localToday(now, tz),
-    roster: [...byKey.values()],
+    roster,
     presentKeys,
   });
 
