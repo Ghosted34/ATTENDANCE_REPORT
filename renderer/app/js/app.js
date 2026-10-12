@@ -1,6 +1,7 @@
 import {
   escapeHtml as esc, exportFileName, paramFieldsHtml, resolveReportParams, tableHtml,
   groupByToggleHtml, emptyStateHtml, viewStateOf, visibleColumns, withViewState, VIEW_KEYS,
+  paginateRows, PAGE_SIZES, DEFAULT_PAGE_SIZE,
 } from "./template.js";
 
 const $ = (s) => document.querySelector(s);
@@ -117,6 +118,8 @@ const GLYPH = (paths, size = 16) =>
   ` stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
 const GLYPH_USER = GLYPH('<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>');
 const GLYPH_LOCK = GLYPH('<rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>');
+const GLYPH_SUN = GLYPH('<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/>', 18);
+const GLYPH_MOON = GLYPH('<path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13Z"/>', 18);
 const EYE_SHOW = GLYPH('<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>');
 const EYE_HIDE = GLYPH('<path d="M2 2l20 20"/><path d="M6.61 6.61A13.5 13.5 0 0 0 2 12s3 7 10 7a9.7 9.7 0 0 0 5.39-1.61"/><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.4 10.4 0 0 1 12 5c7 0 10 7 10 7a13.2 13.2 0 0 1-1.67 2.68"/>');
 
@@ -168,7 +171,7 @@ function loginView() {
         </button>
       </form>
       <footer class="auth-foot">
-        <p class="auth-note">Local development build — sign in with <code>admin</code> / <code>admin</code></p>
+        <p class="auth-note"><span class="dev-badge">DEV</span> Local development build</p>
         ${appVersion ? `<p class="auth-version">${esc(appName)} ${esc(appVersion)}</p>` : ""}
       </footer>
     </div>
@@ -240,13 +243,50 @@ function loginView() {
 }
 
 function homeView() {
-  const list = reportList.map((r) =>
-    `<a href="#/reports/${r.id}"><strong>${esc(r.title)}</strong><span class="muted">${esc(r.description)}</span></a>`).join("");
-  view.innerHTML = `<main><h1>Reports</h1><p class="muted">Choose a report to run.</p>
-    ${list ? `<div class="list">${list}</div>` : `<div class="empty" role="status">
-      <h3>No reports are available</h3>
-      <p>This build registered none. Check the server log for a report that failed to load.</p>
-    </div>`}</main>`;
+  const cards = reportList.map((r, index) => {
+    const isAbsentees = r.id === "absentees";
+    const icon = isAbsentees
+      ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="m17 8 5 5m0-5-5 5"/></svg>'
+      : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/><path d="m9 15 2 2 4-4"/></svg>';
+    const category = isAbsentees ? "Exceptions" : "Attendance";
+    return `<a class="report-card${isAbsentees ? " report-card--absence" : ""}" href="#/reports/${encodeURIComponent(r.id)}">
+      <span class="report-card-icon">${icon}</span>
+      <span class="report-card-index">${String(index + 1).padStart(2, "0")}</span>
+      <span class="report-card-category">${category}</span>
+      <h3>${esc(r.title)}</h3>
+      <p>${esc(r.description)}</p>
+      <span class="report-card-link">Open report
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      </span>
+    </a>`;
+  }).join("");
+  const count = reportList.length;
+  view.innerHTML = `<main class="home">
+    <section class="home-hero" aria-labelledby="homeTitle">
+      <div class="home-hero-copy">
+        <p class="eyebrow"><span class="eyebrow-dot"></span>REPORTING WORKSPACE</p>
+        <h1 id="homeTitle">Reports</h1>
+        <p>Useful attendance insights, all in one place.</p>
+      </div>
+      <div class="home-hero-stat">
+        <span class="home-stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg></span>
+        <span><strong>${count}</strong><span class="home-stat-label">${count === 1 ? "report" : "reports"}<br>available</span></span>
+      </div>
+    </section>
+    <section class="report-library" aria-labelledby="libraryTitle">
+      <div class="section-heading">
+        <div><h2 id="libraryTitle">Report library</h2><p>Choose a report to get started.</p></div>
+      </div>
+      ${cards
+        ? `<div class="report-grid">${cards}</div>`
+        : `<div class="no-reports" role="status">
+            <span class="no-reports-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/><path d="M12 14v3m0 1h.01"/></svg></span>
+            <h3>No reports are available</h3>
+            <p>This build has no reports registered. Check the server log for a report that failed to load.</p>
+          </div>`}
+    </section>
+    <footer class="home-foot"><span>${esc(appName)}</span><span>${appVersion ? `Version ${esc(appVersion)}` : "Local reporting workspace"}</span></footer>
+  </main>`;
 }
 
 function reportView(id) {
@@ -307,47 +347,77 @@ function reportView(id) {
   view.innerHTML = `<main class="report">
     <a class="back" href="#/reports">All reports</a>
     <header class="report-head">
-      <div><h1>${esc(r.title)}</h1><p class="muted">${esc(r.description)}</p></div>
+      <div class="report-title">
+        <p class="report-kicker">REPORT</p>
+        <h1>${esc(r.title)}</h1>
+        <p class="muted">${esc(r.description)}</p>
+      </div>
       <div class="report-meta msg" id="m" role="status" aria-live="polite"></div>
     </header>
     <form class="toolbar" id="f">
-      <div class="field">
-        <label>Report for</label>
-        <div class="segmented-control" id="modeSegments">${modeSegments}</div>
-        ${modeSelect}
+      <div class="toolbar-filters">
+        <div class="field mode-field">
+          <span class="field-label">Report for</span>
+          <div class="segmented-control" id="modeSegments" role="group" aria-label="Report for">${modeSegments}</div>
+          ${modeSelect}
+        </div>
+        ${paramFieldsHtml(r, values, { omit: ["mode"] })}
+        <button class="btn primary run-btn" id="runBtn" aria-keyshortcuts="Control+Enter" data-tooltip="Run report (Ctrl+Enter)">
+          <span id="runBtnText">Run report</span>
+          <span id="runBtnSpinner" class="spinner hidden"></span>
+        </button>
       </div>
-      ${paramFieldsHtml(r, values, { omit: ["mode"] })}
-      <button class="btn primary" id="runBtn" aria-keyshortcuts="Control+Enter" data-tooltip="Run report (Ctrl+Enter)">
-        <span id="runBtnText">Run report</span>
-        <span id="runBtnSpinner" class="spinner hidden"></span>
-      </button>
-      <span class="spacer"></span>
-      <div class="export-group" id="exportGroup">
-        <button type="button" class="btn" data-x="xlsx" data-label="Excel" disabled data-tooltip="Export to Excel">Excel</button>
-        <button type="button" class="btn" data-x="csv" data-label="CSV" disabled data-tooltip="Export to CSV">CSV</button>
-        <button type="button" class="btn" data-x="pdf" data-label="PDF" disabled data-tooltip="Export to PDF">PDF</button>
-      </div>
-      <div class="field" style="margin-left:auto">
-        <label>&nbsp;</label>
-        ${groupByToggleHtml(useGroupBy)}
-      </div>
-      <div class="field columns-field">
-        <label>&nbsp;</label>
-        <div class="columns-menu">
-          <button type="button" class="btn" id="columnsBtn" aria-expanded="false"
-                  aria-controls="columnsPanel" data-tooltip="Show or hide columns">
-            <span id="columnsCount">Columns</span>
-          </button>
-          <div class="columns-panel hidden" id="columnsPanel" role="group" aria-label="Columns to show">
-            <p class="columns-title">Show columns</p>
-            <div class="columns-list" id="columnsList"></div>
-            <p class="columns-note">Excel, CSV and PDF always include every column.</p>
+      <div class="toolbar-actions">
+        <div class="toolbar-view-controls">
+          <div class="field grouping-field">
+            <span class="field-label">Group rows</span>
+            ${groupByToggleHtml(useGroupBy)}
+          </div>
+          <div class="field columns-field">
+            <span class="field-label">Visible columns</span>
+            <div class="columns-menu">
+              <button type="button" class="btn" id="columnsBtn" aria-label="Visible columns" aria-expanded="false"
+                      aria-controls="columnsPanel" data-tooltip="Show or hide columns">
+                <span id="columnsCount">Columns</span>
+              </button>
+              <div class="columns-panel hidden" id="columnsPanel" role="group" aria-label="Columns to show">
+                <p class="columns-title">Show columns</p>
+                <div class="columns-list" id="columnsList"></div>
+                <p class="columns-note">Excel, CSV and PDF always include every column.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="toolbar-export">
+          <span class="toolbar-label">Export</span>
+          <div class="export-group" id="exportGroup" role="group" aria-label="Export report">
+            <button type="button" class="btn" data-x="xlsx" data-label="Excel" disabled data-tooltip="Export to Excel">Excel</button>
+            <button type="button" class="btn" data-x="csv" data-label="CSV" disabled data-tooltip="Export to CSV">CSV</button>
+            <button type="button" class="btn" data-x="pdf" data-label="PDF" disabled data-tooltip="Export to PDF">PDF</button>
           </div>
         </div>
       </div>
     </form>
     <div class="table-wrap hidden" id="out" role="region" aria-label="Report results"></div>
-    <div id="progressBar" class="progress hidden"><i id="progressInner"></i></div></main>`;
+    <div class="table-footer hidden" id="pagination">
+      <p class="page-summary" id="pageSummary" role="status" aria-live="polite"></p>
+      <div class="page-controls hidden" id="pageControls">
+        <label class="page-size" for="pageSize"><span>Rows per page</span>
+          <select id="pageSize">${PAGE_SIZES.map((size) => `<option value="${size}"${size === DEFAULT_PAGE_SIZE ? " selected" : ""}>${size}</option>`).join("")}</select>
+        </label>
+        <nav class="page-nav" id="pageNavigation" aria-label="Report pages">
+          <button class="btn page-button" id="previousPage" type="button" aria-label="Previous page">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+          </button>
+          <span class="page-indicator" id="pageIndicator"></span>
+          <button class="btn page-button" id="nextPage" type="button" aria-label="Next page">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+          </button>
+        </nav>
+      </div>
+    </div>
+    <div id="progressBar" class="progress hidden"><i id="progressInner"></i></div>
+  </main>`;
 
   const form = $("#f"), msg = $("#m"), out = $("#out");
   const modeSegmentsEl = $("#modeSegments");
@@ -361,11 +431,30 @@ function reportView(id) {
   const runBtnSpinner = $("#runBtnSpinner");
   const progressBar = $("#progressBar");
   const exportGroup = $("#exportGroup");
+  const pagination = $("#pagination");
+  const pageSummary = $("#pageSummary");
+  const pageControls = $("#pageControls");
+  const pageSizeSelect = $("#pageSize");
+  const previousPage = $("#previousPage");
+  const nextPage = $("#nextPage");
+  const pageIndicator = $("#pageIndicator");
 
-  // Current groupBy state
+  // The URL restores the view controls and requested slice; Run report fetches the rows again.
   let currentGroupBy = useGroupBy;
+  let currentPage = urlView.page || 1;
+  let pageSize = urlView.pageSize || DEFAULT_PAGE_SIZE;
+  pageSizeSelect.value = String(pageSize);
 
   const valuesNow = () => Object.fromEntries(new FormData(form));
+  const activeWindow = () => {
+    const values = valuesNow();
+    return Object.fromEntries((r.params || []).map((field) => [field.name, values[field.name]])
+      .filter(([, value]) => value !== undefined && value !== ""));
+  };
+  let comparisonWindow = activeWindow();
+  // Filled only after a successful run, so a view toggle before the first run does not write an
+  // unrequested default window into the address.
+  let runWindow = {};
   // Only the visible fields are submitted; the URL's extra keys are appended untouched.
   const qs = () => {
     const params = new URLSearchParams(new FormData(form));
@@ -461,8 +550,9 @@ function reportView(id) {
         b.setAttribute('aria-current', b.dataset.groupby === String(groupBy) ? 'true' : 'false');
       });
 
-      // Update preference
+      // Update preference. A different grouping changes section boundaries, so start again at page one.
       currentGroupBy = groupBy;
+      currentPage = 1;
       window.toggleGroupBy();
 
       syncGroupTabs?.();
@@ -516,6 +606,8 @@ function reportView(id) {
     // The Absentees report shares this window, but not on its own empty state.
     const canRunAbsentees = id !== "absentees" && reportList.some((x) => x.id === "absentees");
     const period = PERIOD_WORDS[valuesNow().mode || "single"] || PERIOD_WORDS.single;
+    setMsg(`${latestSubtitle} · No records found`);
+    pagination.classList.add("hidden");
     out.classList.remove("hidden");
     out.innerHTML = emptyStateHtml({ period, canRunAbsentees });
     out.querySelector('[data-empty-action="absentees"]')?.addEventListener("click", openAbsentees);
@@ -527,8 +619,6 @@ function reportView(id) {
   let latestColumns = [];
   let latestSubtitle = "";
   let currentSort = urlView.sort;
-  // The window this report has been run with: what the address should carry once it has.
-  let runWindow = {};
 
   /** The short name of the column the table is ordered by, for the status line. */
   const sortCaption = () => {
@@ -549,26 +639,60 @@ function reportView(id) {
     // looks the column up in the full list, so hiding a column cannot break the sort it created.
     const sort = currentSort && cols.some((c) => c.key === currentSort.key) ? currentSort : null;
     currentSort = sort;
-    const summary = computeSummary(latestRows, currentGroupBy ? r.groupBy : null);
+    const groupBy = currentGroupBy ? r.groupBy : null;
+    const page = paginateRows(latestRows, { page: currentPage, pageSize, groupBy, sort });
+    currentPage = page.page;
+    pageSize = page.pageSize;
+    const summary = computeSummary(latestRows, groupBy);
+    const number = (value) => new Intl.NumberFormat().format(value);
     setMsg(`${latestSubtitle} · ${formatSummary(summary)}${sortCaption()}`);
     syncColumnsMenu(cols);
     out.classList.remove("hidden");
     out.innerHTML = tableHtml({
       columns: visibleColumns(cols, hiddenColumns),
-      groupBy: currentGroupBy ? r.groupBy : null, rows: latestRows, statusPill, sort,
+      groupBy, rows: page.rows, groupCounts: page.groupCounts, statusPill, sort,
     });
+
+    const first = page.startIndex + 1;
+    const last = page.startIndex + page.rows.length;
+    pageSummary.textContent = page.totalRows === 1
+      ? "Showing 1 record"
+      : `Showing ${number(first)}–${number(last)} of ${number(page.totalRows)} records`;
+    pageIndicator.textContent = `Page ${number(page.page)} of ${number(page.totalPages)}`;
+    pageSizeSelect.value = String(page.pageSize);
+    previousPage.disabled = page.page <= 1;
+    nextPage.disabled = page.page >= page.totalPages;
+    pageControls.classList.toggle("hidden", page.totalRows <= PAGE_SIZES[0]);
+    pagination.classList.remove("hidden");
     syncViewInUrl();
   };
 
   /**
-   * How a report is being read belongs in the address, so the view survives a reload and a link.
-   * The window is written too, once a report has actually been run with it.
+   * How a report is being read belongs in the address, so its controls and requested slice are
+   * restored on reload or a link. The rows still need a fresh run; the window is written only
+   * after a report has actually been run with it.
    */
   const syncViewInUrl = () => {
     const params = hashQuery();
     for (const [name, value] of Object.entries(runWindow)) params.set(name, value);
-    replaceHashQuery(id, withViewState(params, { sort: currentSort, groupBy: currentGroupBy }));
+    replaceHashQuery(id, withViewState(params, {
+      sort: currentSort, groupBy: currentGroupBy, page: currentPage, pageSize,
+    }));
   };
+
+  const goToPage = (page) => {
+    currentPage = page;
+    out.scrollTop = 0;
+    renderTable();
+  };
+  previousPage.addEventListener("click", () => goToPage(currentPage - 1));
+  nextPage.addEventListener("click", () => goToPage(currentPage + 1));
+  pageSizeSelect.addEventListener("change", () => {
+    const firstVisibleRow = (currentPage - 1) * pageSize;
+    pageSize = Number(pageSizeSelect.value);
+    currentPage = Math.floor(firstVisibleRow / pageSize) + 1;
+    renderTable();
+  });
 
   /* ---------- Columns ---------- */
 
@@ -628,6 +752,7 @@ function reportView(id) {
     if (!currentSort || currentSort.key !== key) currentSort = { key, dir: "asc" };
     else if (currentSort.dir === "asc") currentSort = { key, dir: "desc" };
     else currentSort = null;
+    currentPage = 1;
     renderTable();
   });
 
@@ -636,9 +761,13 @@ function reportView(id) {
     const invalid = validate();
     if (invalid) {
       out.classList.add("hidden");
+      pagination.classList.add("hidden");
       progressBar.classList.add("hidden");
       return setMsg(invalid, "err");
     }
+
+    const requestedWindow = activeWindow();
+    if (JSON.stringify(requestedWindow) !== JSON.stringify(comparisonWindow)) currentPage = 1;
 
     // Show loading state
     setMsg("Running\u2026");
@@ -648,6 +777,7 @@ function reportView(id) {
     exportGroup.querySelectorAll("[data-x]").forEach((b) => (b.disabled = true));
     progressBar.classList.remove("hidden");
     out.classList.add("hidden");
+    pagination.classList.add("hidden");
 
     // Animate progress bar
     const progressInner = $("#progressInner");
@@ -669,20 +799,19 @@ function reportView(id) {
       runBtnText.textContent = "Run report";
       runBtnSpinner.classList.add("hidden");
 
-      // The window that worked is the one to offer next time, and the one in the address — so a
-      // reload or a shared link reopens the same report rather than today's.
-      const used = valuesNow();
-      const window_ = Object.fromEntries(
-        (r.params || []).map((field) => [field.name, used[field.name]]).filter(([, value]) => value !== undefined && value !== ""),
-      );
+      // The window that worked is offered next time and written to the address, so a reload or
+      // shared link restores those controls rather than today's. The reader can run it again.
+      const window_ = activeWindow();
       window.setLastWindow?.(id, window_);
       runWindow = window_;
-      syncViewInUrl();
+      comparisonWindow = window_;
 
       if (rows.length) {
-        renderTable(); // sets the summary line and draws the table
+        renderTable(); // sets the summary line, page summary and draws one page of the table
         exportGroup.querySelectorAll("[data-x]").forEach((b) => (b.disabled = false));
       } else {
+        currentPage = 1;
+        syncViewInUrl();
         showEmpty();
       }
     } catch (err) {
@@ -691,6 +820,7 @@ function reportView(id) {
       runBtnText.textContent = "Run report";
       runBtnSpinner.classList.add("hidden");
       out.classList.add("hidden");
+      pagination.classList.add("hidden");
 
       // Check if it's an error that needs special handling
       const errorMsg = err.message;
@@ -705,7 +835,7 @@ function reportView(id) {
         <h4>Report Error</h4>
         <p>${esc(errorMsg)}</p>
         ${errorMsg.includes("241") || errorMsg.includes("242") || errorMsg.includes("9810")
-          ? '<p style="margin-top:var(--sp-2);font-size:var(--text-hint)">Run <code>npm run doctor</code> to check your database configuration.</p>'
+          ? '<p class="error-alert-hint">Run <code>npm run doctor</code> to check your database configuration.</p>'
           : ''}
       </div>`;
       out.classList.remove("hidden");
@@ -791,7 +921,17 @@ function route() {
   handFocusToView();
 }
 
-$("#themeBtn").onclick = () => window.toggleTheme();
+const themeBtn = $("#themeBtn");
+const syncThemeButton = () => {
+  const dark = document.documentElement.dataset.theme === "dark";
+  const label = dark ? "Switch to light theme" : "Switch to dark theme";
+  themeBtn.setAttribute("aria-label", label);
+  themeBtn.setAttribute("aria-pressed", String(dark));
+  themeBtn.dataset.tooltip = label;
+  themeBtn.innerHTML = dark ? GLYPH_MOON : GLYPH_SUN;
+};
+themeBtn.onclick = () => { window.toggleTheme(); syncThemeButton(); };
+syncThemeButton();
 
 // Density lives in the top bar next to the theme: it is a property of the desk, not of a report.
 const densityBtn = $("#densityBtn");

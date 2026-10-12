@@ -11,10 +11,11 @@
  *     not match are hidden and disabled, so they never reach the request.
  *   - Defaults: a field's own `default` (for example today for date fields, or the current
  *     month for month fields) is used until the URL or the user says otherwise.
- *   - Dynamic (extra) inputs: any *other* key in the page URL is passed straight through
- *     to the report on every run and export. Paste the window a report needs, such as
- *     `?mode=range&start=2026-08-16&end=2026-08-19`, and the fields are preset while the
- *     extra keys keep travelling with the request.
+ *   - Dynamic (extra) inputs: any unrecognized *report* key in the page URL is passed through
+ *     to the report on every run and export. The reserved sort, grouping and pagination keys are
+ *     removed before the request. Paste a window such as
+ *     `?mode=range&start=2026-08-16&end=2026-08-19` and the fields are preset while other report
+ *     keys keep travelling with the request.
  *
  * Presentation
  *   - `groupBy` turns rows into sections with a heading and a count (default: department).
@@ -73,11 +74,13 @@ export function resolveReportParams(report, { query = parseQuery(location.search
 
 /**
  * The keys that describe *how* a report is being read rather than *what* it asked the database
- * for: which column it is ordered by, and whether the rows are grouped. They live in the URL so a
- * view can be bookmarked and shared, and they are kept out of what travels to the report — a
- * report is asked about a window, not about a sort.
+ * for: sort order, grouping, and the current page size. They live in the URL so a view can be
+ * bookmarked and shared, and they are kept out of what travels to the report — a report is asked
+ * about a window, not about its presentation.
  */
-export const VIEW_KEYS = Object.freeze(["sort", "dir", "group"]);
+export const VIEW_KEYS = Object.freeze(["sort", "dir", "group", "page", "pageSize"]);
+export const PAGE_SIZES = Object.freeze([25, 50, 100]);
+export const DEFAULT_PAGE_SIZE = 50;
 
 /** The view a query string asks for. `null` means "not specified here", not "false". */
 export function viewStateOf(search = "") {
@@ -85,14 +88,18 @@ export function viewStateOf(search = "") {
   const dir = query.get("dir") === "desc" ? "desc" : query.get("dir") === "asc" ? "asc" : null;
   const key = (query.get("sort") || "").trim();
   const group = query.get("group");
+  const pageValue = Number(query.get("page"));
+  const sizeValue = Number(query.get("pageSize"));
   return {
     sort: key && dir ? { key, dir } : null,
     groupBy: group === "grouped" ? true : group === "flat" ? false : null,
+    page: Number.isSafeInteger(pageValue) && pageValue > 1 ? pageValue : null,
+    pageSize: PAGE_SIZES.includes(sizeValue) ? sizeValue : null,
   };
 }
 
 /** The same query string with the view state written into it, or taken out of it. */
-export function withViewState(search = "", { sort = null, groupBy = null } = {}) {
+export function withViewState(search = "", { sort = null, groupBy = null, page = null, pageSize = null } = {}) {
   const params = search instanceof URLSearchParams ? search : parseQuery(search);
   for (const key of VIEW_KEYS) params.delete(key);
   if (sort?.key && (sort.dir === "asc" || sort.dir === "desc")) {
@@ -100,6 +107,18 @@ export function withViewState(search = "", { sort = null, groupBy = null } = {})
     params.set("dir", sort.dir);
   }
   if (groupBy === true || groupBy === false) params.set("group", groupBy ? "grouped" : "flat");
+
+  // Page size is explicit on later pages so a shared link always opens at the same boundary,
+  // even when the person opening it has a different local preference.
+  const pageNumber = Number(page);
+  const size = PAGE_SIZES.includes(Number(pageSize)) ? Number(pageSize) : DEFAULT_PAGE_SIZE;
+  if (Number.isSafeInteger(pageNumber) && pageNumber > 1) {
+    params.set("page", String(pageNumber));
+    params.set("pageSize", String(size));
+  } else if (size !== DEFAULT_PAGE_SIZE) {
+    params.set("pageSize", String(size));
+  }
+
   const query = params.toString();
   return query ? `?${query}` : "";
 }
@@ -169,7 +188,7 @@ export function groupByToggleHtml(useGroupBy = true) {
     `<button type="button" class="btn" data-groupby="${value}"` +
     ` aria-pressed="${active(value)}" aria-current="${active(value)}" data-tooltip="${escapeHtml(tooltip)}">` +
     `${icon}<span>${escapeHtml(label)}</span></button>`;
-  return `<div class="segmented-control" id="groupByToggle" role="group" aria-label="Row grouping" style="width:auto">` +
+  return `<div class="segmented-control" id="groupByToggle" role="group" aria-label="Row grouping">` +
     option(true, "By Dept", "Group rows under a heading per department", ICON_GROUPED) +
     option(false, "All Together", "One flat list of every row", ICON_FLAT) +
     `</div>`;
@@ -225,6 +244,44 @@ export function sortRows(rows, sort = {}) {
     .map(({ row }) => row);
 }
 
+/**
+ * Sorts in the same order the table displays, then returns only one page. Grouped reports keep
+ * their section order and sort inside each section; the count map lets a section split across two
+ * pages keep showing its full result count rather than a misleading count for just that page.
+ */
+export function paginateRows(rows = [], { page = 1, pageSize = DEFAULT_PAGE_SIZE, groupBy = null, sort = null } = {}) {
+  const list = Array.isArray(rows) ? rows : [];
+  const requestedSize = Number(pageSize);
+  const size = Number.isSafeInteger(requestedSize) && requestedSize > 0 ? requestedSize : DEFAULT_PAGE_SIZE;
+  const requestedPage = Number(page);
+  const totalRows = list.length;
+  const totalPages = Math.max(1, Math.ceil(totalRows / size));
+  const currentPage = Number.isSafeInteger(requestedPage)
+    ? Math.min(totalPages, Math.max(1, requestedPage))
+    : 1;
+  let ordered;
+  let groupCounts = null;
+
+  if (groupBy) {
+    const sections = [...sectionsOf(list, groupBy)];
+    groupCounts = new Map(sections.filter(([name]) => name !== null).map(([name, section]) => [name, section.length]));
+    ordered = sections.flatMap(([, section]) => sortRows(section, sort));
+  } else {
+    ordered = sortRows(list, sort);
+  }
+
+  const startIndex = (currentPage - 1) * size;
+  return {
+    rows: ordered.slice(startIndex, startIndex + size),
+    page: currentPage,
+    pageSize: size,
+    totalRows,
+    totalPages,
+    startIndex,
+    groupCounts,
+  };
+}
+
 /** The caret on a sorted header. Decoration: `aria-sort` on the cell carries the meaning. */
 const CARET_ASC = '<svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>';
 const CARET_DESC = '<svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
@@ -238,7 +295,7 @@ const widthOf = (column) => {
 };
 
 /** The results table: sticky head, group headings, right-aligned and wrapping cells. */
-export function tableHtml({ columns, groupBy, rows, statusPill = defaultStatusPill, sort = null }) {
+export function tableHtml({ columns, groupBy, rows, statusPill = defaultStatusPill, sort = null, groupCounts = null }) {
   const sorted = (list) => (sort ? sortRows(list, sort) : list);
   const cells = (row, tag) => columns.map((c) => {
     let value = row[c.key];
@@ -272,7 +329,7 @@ export function tableHtml({ columns, groupBy, rows, statusPill = defaultStatusPi
       // A null name means the row has no value for the grouping column: the rows still show, with
       // no heading — the same rule server/reports/export.js follows.
       body += "<tbody>" +
-        (name === null ? "" : `<tr class="grp"><td colspan="${columns.length}">${escapeHtml(name)} (${ordered.length})</td></tr>`) +
+        (name === null ? "" : `<tr class="grp"><td colspan="${columns.length}">${escapeHtml(name)} (${groupCounts?.get(name) ?? ordered.length})</td></tr>`) +
         ordered.map(line).join("") + "</tbody>";
     }
   } else {
