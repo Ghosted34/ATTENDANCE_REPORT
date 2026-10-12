@@ -11,7 +11,9 @@ import attendance, {
   readEventTimeType, readReportShape, ROSTER_SQL, rosterSqlFor, runPeriod, statementFor, subtitle,
   TEXT_SAFE_STATEMENT, weekdayOf,
 } from "../server/reports/attendance.js";
-import absentees, { columnsFor as absenteesColumnsFor } from "../server/reports/absentees.js";
+import absentees, {
+  columnsFor as absenteesColumnsFor, exportColumnsFor as absenteesExportColumnsFor,
+} from "../server/reports/absentees.js";
 import { classifyColumn, isDateShapeError, isError241 } from "../server/doctor.js";
 import { columnsOf, group, toCsv, toHtml, toXlsx } from "../server/reports/export.js";
 import { sectionsOf } from "../renderer/app/js/template.js";
@@ -31,13 +33,15 @@ const dbRows = [
     CardNumber: 555, FirstEntry: "09:15:00", LastEntry: "09:15:00", DurationMin: 0, AccessCount: 1 },
 ];
 
-// Active employees (IsActive = 1 in the roster query). Ada and Ben swiped in the range above; Chi
-// never did, so Chi is the person the report must list as Absent on every day. Chi's EmployeeID
-// is absent: the column exists, the value does not, the cell stays "—".
+// Active employees (IsActive = 1 in the roster query), with the card each one is known by: the
+// roster statement reads it with an OUTER APPLY over the latest granted swipe, so an absent day
+// still has a Card no. Ada and Ben swiped in the range above; Chi never did, so Chi is the person
+// the report must list as Absent on every day. Chi's EmployeeID is absent and she has no card on
+// file: the column exists, the values do not, so both cells stay "—" (never PeopleID 11).
 const roster = [
-  { PeopleID: 7, EmployeeID: "E-1007", Firstname: "Ada", Lastname: "Obi", Department: "Ops" },
-  { PeopleID: 9, EmployeeID: "E-1009", Firstname: "Ben", Lastname: "Nwosu", Department: "Security" },
-  { PeopleID: 11, EmployeeID: null, Firstname: "Chi", Lastname: "Eze", Department: "Ops" },
+  { PeopleID: 7, EmployeeID: "E-1007", Firstname: "Ada", Lastname: "Obi", Department: "Ops", CardNumber: 1234 },
+  { PeopleID: 9, EmployeeID: "E-1009", Firstname: "Ben", Lastname: "Nwosu", Department: "Security", CardNumber: 9876 },
+  { PeopleID: 11, EmployeeID: null, Firstname: "Chi", Lastname: "Eze", Department: "Ops", CardNumber: null },
 ];
 
 // A fixed "now" (12 Oct 2026 09:00 UTC, i.e. 10:00 in Lagos) so the future-day cut-off is stable.
@@ -291,11 +295,12 @@ test("subtitle names the day (with its weekday), the range or the month, and its
 test("the Day column names each row's weekday in every period, and the absentee report has it too", async () => {
   const { queryFn } = fakeQuery();
   const single = await attendance.run({ date: "2026-10-05" }, { tz: 1, queryFn, now: NOW });
-  assert.deepEqual(single.map((r) => [r.date, r.day, r.name, r.status, r.idNumber]), [
-    ["2026-10-05", "Monday", "Obi Ada", "Present", "E-1007"],
-    ["2026-10-05", "Monday", "Eze Chi", "Absent", "—"],
-    ["2026-10-05", "Monday", "Nwosu Ben", "Absent", "E-1009"],
-    ["2026-10-05", "Monday", "Unknown", "Present", "—"], // swipe whose person is not in p_people
+  assert.deepEqual(single.map((r) => [r.date, r.day, r.name, r.status, r.idNumber, r.cardNumber]), [
+    ["2026-10-05", "Monday", "Obi Ada", "Present", "E-1007", 1234],
+    ["2026-10-05", "Monday", "Eze Chi", "Absent", "—", "—"],
+    // No swipe on the 5th for Ben, so the day has no card of its own: the known card is shown.
+    ["2026-10-05", "Monday", "Nwosu Ben", "Absent", "E-1009", 9876],
+    ["2026-10-05", "Monday", "Unknown", "Present", "—", 555], // swipe whose person is not in p_people
   ]);
 
   const range = await attendance.run({ mode: "range", start: "2026-10-05", end: "2026-10-07" }, { tz: 1, queryFn, now: NOW });
@@ -303,14 +308,29 @@ test("the Day column names each row's weekday in every period, and the absentee 
   assert.equal(range.length > 0, true);
   for (const row of range) assert.equal(row.day, weekdays[row.date], `${row.date} is a ${weekdays[row.date]}`);
 
-  // The absentee report leaves out the swipe columns, but keeps the same period columns.
+  // The absentee report leaves out the swipe columns, but keeps the same period columns — and
+  // keeps Employee ID beside Card no., exactly where the attendance report has them.
   const absenteeRows = await absentees.run({ mode: "range", start: "2026-10-05", end: "2026-10-07" }, { tz: 1, queryFn, now: NOW });
   assert.equal(absenteeRows.every((r) => r.status === "Absent"), true);
   assert.deepEqual(absenteeRows.map((r) => [r.date, r.day]).slice(0, 2), [["2026-10-05", "Monday"], ["2026-10-06", "Tuesday"]]);
   assert.deepEqual(absenteesColumnsFor({ mode: "single", date: "2026-10-05" }).map((c) => c.key),
-    ["day", "name", "idNumber", "department"]);
+    ["day", "name", "idNumber", "cardNumber", "department"]);
   assert.deepEqual(absenteesColumnsFor({ mode: "month", month: "2026-10" }).map((c) => c.key),
-    ["date", "day", "name", "idNumber", "department"]);
+    ["date", "day", "name", "idNumber", "cardNumber", "department"]);
+  assert.deepEqual(absenteesColumnsFor({ mode: "range", start: "2026-10-05", end: "2026-10-07" }).map((c) => c.label),
+    ["Date", "Day", "Name", "Employee ID", "Card no.", "Department"]);
+  // Screen, CSV, Excel and print read one list, so a sheet cannot drift from the table.
+  for (const params of [
+    { mode: "single", date: "2026-10-05" },
+    { mode: "range", start: "2026-10-05", end: "2026-10-07" },
+    { mode: "month", month: "2026-10" },
+  ]) {
+    assert.deepEqual(absenteesExportColumnsFor(params).map((c) => c.key),
+      absenteesColumnsFor(params).map((c) => c.key), params.mode);
+  }
+  // No Status, First entry, Last entry, Duration or Swipes column sneaks into the absentee list.
+  assert.deepEqual(absenteesColumnsFor({ mode: "month", month: "2026-10" })
+    .filter((c) => ["status", "firstEntry", "lastEntry", "duration", "accessCount"].includes(c.key)), []);
 });
 
 test("rows run by department, then Present before Absent, and by date inside each of those blocks", async () => {
@@ -617,7 +637,7 @@ test("eligible employees with no swipe are listed as Absent on every day of the 
   const out = await attendance.run({ mode: "range", start: "2026-10-05", end: "2026-10-07" }, { tz: 1, queryFn, now: NOW });
 
   // Chi never swiped: one Absent row per day, with the absence shown in the swipe columns too.
-  // Her EmployeeID is null, so the cell is "—", not PeopleID 11.
+  // Her EmployeeID is null and she has no card on file, so both cells are "—" — never PeopleID 11.
   const chi = out.filter((r) => r.name === "Eze Chi");
   assert.deepEqual(chi.map((r) => r.date), ["2026-10-05", "2026-10-06", "2026-10-07"]);
   for (const row of chi) {
@@ -636,6 +656,18 @@ test("eligible employees with no swipe are listed as Absent on every day of the 
   ]);
   assert.deepEqual(out.filter((r) => r.idNumber === "E-1009").map((r) => [r.date, r.status]), [
     ["2026-10-06", "Present"], ["2026-10-05", "Absent"], ["2026-10-07", "Absent"],
+  ]);
+  // Present and absent days of one person agree on Employee ID *and* on Card no.: the absent day
+  // has no swipe to read a card from, so it shows the card the person is known by.
+  assert.deepEqual(out.filter((r) => r.name === "Obi Ada").map((r) => [r.date, r.status, r.idNumber, r.cardNumber]), [
+    ["2026-10-05", "Present", "E-1007", 1234],
+    ["2026-10-06", "Present", "E-1007", 1234],
+    ["2026-10-07", "Absent", "E-1007", 1234], // the day's swipes are absent, the known card is not
+  ]);
+  assert.deepEqual(out.filter((r) => r.name === "Nwosu Ben").map((r) => [r.date, r.status, r.idNumber, r.cardNumber]), [
+    ["2026-10-06", "Present", "E-1009", 9876],
+    ["2026-10-05", "Absent", "E-1009", 9876],
+    ["2026-10-07", "Absent", "E-1009", 9876],
   ]);
   // Chi and the unmatched swipe both display "—" on the 5th, and they stay two rows: the match
   // key is PeopleID, not the displayed badge.
@@ -658,6 +690,146 @@ test("the roster is the active employees only, by the IsActive flag, and is boun
   assert.doesNotMatch(ROSTER_SQL, /\d{4}-\d{2}/); // no value is interpolated into the statement
 });
 
+test("the roster reads each person's latest known card in the same statement, with no GROUP BY", () => {
+  // One seek per active person inside the roster that already runs: an OUTER APPLY, not a second
+  // query, not a query per person and not an aggregate over all of EventHistory.
+  assert.equal(ROSTER_SQL, rosterSqlFor("EmployeeID", "datetime"));
+  assert.match(ROSTER_SQL, /OUTER APPLY \(/);
+  assert.match(ROSTER_SQL, /SELECT TOP \(1\) eh\.CardNumber/);
+  assert.match(ROSTER_SQL, /ORDER BY eh\.EventUTCTime DESC/);
+  assert.match(ROSTER_SQL, /\) AS card/);
+  assert.match(ROSTER_SQL, /pp\.Department, card\.CardNumber/); // selected, so the row mapper reads it
+  assert.doesNotMatch(ROSTER_SQL, /GROUP BY/i);
+  assertBalancedSql(ROSTER_SQL);
+
+  // The apply is the same granted-access, non-zero-card rule the swipe statement filters on, and
+  // it correlates on PeopleID: the join identity, never the displayed badge.
+  assert.match(ROSTER_SQL, /WHERE eh\.PeopleID = pp\.PeopleID/);
+  assert.match(ROSTER_SQL, /TRY_CONVERT\(int, eh\.EventCategory\) = 10001/);
+  assert.match(ROSTER_SQL, /eh\.EventDescription = N'Access Granted'/);
+  assert.match(ROSTER_SQL, /eh\.CardNumber IS NOT NULL AND LTRIM\(RTRIM\(CONVERT\(VARCHAR\(64\), eh\.CardNumber\)\)\) <> '0'/);
+
+  // The apply sits beside the FROM, so it cannot change who is eligible or how the filter binds.
+  assert.ok(ROSTER_SQL.indexOf("OUTER APPLY") < ROSTER_SQL.indexOf("WHERE TRY_CONVERT(int, pp.IsActive) = 1"));
+  assert.match(ROSTER_SQL, /FROM dbo\.p_people AS pp\s+OUTER APPLY/);
+
+  // A legacy text time column is ordered through TRY_CONVERT, so looking for the newest card
+  // cannot raise 241 on a value the column cannot parse.
+  const text = rosterSqlFor("EmployeeID", "text");
+  assert.match(text, /ORDER BY TRY_CONVERT\(datetime2\(3\), eh\.EventUTCTime\) DESC/);
+  assert.doesNotMatch(text, /ORDER BY eh\.EventUTCTime DESC/);
+  assert.doesNotMatch(text, /GROUP BY/i);
+  assertBalancedSql(text);
+  // A date-only column and an unreadable one take the same safe ordering; datetime does not.
+  for (const kind of ["date", "missing", "unknown"]) {
+    assert.match(rosterSqlFor("EmployeeID", kind), /ORDER BY TRY_CONVERT\(datetime2\(3\), eh\.EventUTCTime\) DESC/, kind);
+  }
+  assert.match(rosterSqlFor("EmployeeID", "datetime"), /ORDER BY eh\.EventUTCTime DESC/);
+  // The badge fallback keeps the card lookup: a catalog without EmployeeID still shows a card.
+  assert.match(rosterSqlFor("PeopleID", "datetime"), /SELECT TOP \(1\) eh\.CardNumber/);
+  assert.match(rosterSqlFor("PeopleID", "datetime"), /pp\.PeopleID AS EmployeeID/);
+  assert.throws(() => rosterSqlFor("EmployeeID; DROP TABLE x", "datetime"), /EmployeeID or, if that column is absent/);
+});
+
+test("a run binds the roster to the catalog's time kind, so the card lookup cannot raise 241", async () => {
+  for (const [kind, expected] of [["datetime", rosterSqlFor("EmployeeID", "datetime")], ["nvarchar", rosterSqlFor("EmployeeID", "text")]]) {
+    const calls = [];
+    const queryFn = async (sql, params) => {
+      calls.push({ sql, params });
+      if (/INFORMATION_SCHEMA/.test(sql)) return [{ name: "EventUTCTime", kind }, { name: "EmployeeID", kind: "nvarchar" }];
+      if (/IsActive/.test(sql)) return roster;
+      return swipesIn(params);
+    };
+    await attendance.run({ date: "2026-10-05" }, { tz: 1, queryFn, now: NOW });
+    // Still three round trips in total: the catalog, the swipes, the roster. The card arrives
+    // inside the roster, so there is no third query and none per person.
+    assert.equal(calls.length, 3, kind);
+    assert.equal(calls[2].sql, expected, kind);
+    assert.deepEqual(calls[2].params, { idNumber: "" }, kind);
+  }
+});
+
+test("an absent day shows the card the person is known by, and a blank or zero card stays —", async () => {
+  // Nobody swiped inside the window, so every card here comes from the roster's OUTER APPLY: the
+  // latest granted card on file. The catalog answer names EmployeeID — without it the report would
+  // correctly fall back to PeopleID and the statement would not be rosterSqlFor("EmployeeID", "datetime").
+  const people = [
+    { PeopleID: 21, EmployeeID: "E-1015", Firstname: "Dan", Lastname: "Eze", Department: "Ops", CardNumber: 4242 },
+    { PeopleID: 22, EmployeeID: "E-1016", Firstname: "Ivy", Lastname: "Ude", Department: "Ops", CardNumber: 0 },
+    { PeopleID: 23, EmployeeID: "E-1017", Firstname: "Joy", Lastname: "Ada", Department: "Ops", CardNumber: "   " },
+    { PeopleID: 24, EmployeeID: null, Firstname: "Ken", Lastname: "Obi", Department: "Ops", CardNumber: null },
+  ];
+  const calls = [];
+  const queryFn = async (sql, params) => {
+    calls.push({ sql, params });
+    if (/INFORMATION_SCHEMA/.test(sql)) {
+      return [{ name: "EventUTCTime", kind: "datetime" }, { name: "EmployeeID", kind: "nvarchar" }];
+    }
+    if (/IsActive/.test(sql)) return people;
+    assert.deepEqual(params.startYmd, 20261005);
+    return []; // not one swipe in the window
+  };
+
+  const rows = await absentees.run({ date: "2026-10-05" }, { tz: 1, queryFn, now: NOW });
+  assert.equal(calls.length, 3); // the catalog, the swipes, the roster: the card rides along in the roster
+  assert.equal(calls[2].sql, rosterSqlFor("EmployeeID", "datetime"));
+  assert.deepEqual(rows.map((r) => [r.date, r.day, r.name, r.idNumber, r.cardNumber, r.department]), [
+    ["2026-10-05", "Monday", "Ada Joy", "E-1017", "—", "Ops"], // a blank card is not a card
+    ["2026-10-05", "Monday", "Eze Dan", "E-1015", 4242, "Ops"], // the known card, on a day with no swipe
+    ["2026-10-05", "Monday", "Obi Ken", "—", "—", "Ops"], // no badge and no card: never PeopleID 24
+    ["2026-10-05", "Monday", "Ude Ivy", "E-1016", "—", "Ops"], // a zero card is not a card
+  ]);
+  // The attendance report reads the same rows, so its Absent cells say the same thing, and its
+  // column list still has Card no. between Employee ID and Department.
+  const attendanceRows = await attendance.run({ date: "2026-10-05" }, { tz: 1, queryFn, now: NOW });
+  assert.deepEqual(attendanceRows.map((r) => [r.name, r.status, r.idNumber, r.cardNumber]),
+    rows.map((r) => [r.name, r.status, r.idNumber, r.cardNumber]));
+  assert.deepEqual(columnsFor({ date: "2026-10-05" }).map((c) => c.label).slice(1, 5),
+    ["Name", "Employee ID", "Card no.", "Department"]);
+});
+
+test("a blank roster badge or card is filled from a swipe of the same PeopleID in the same run", async () => {
+  // The roster rows carry neither value, but Nia swiped in the window with both. That fill happens
+  // in memory, after the two queries that already run: no third round trip, no query per person —
+  // and it only ever fills a blank, so nothing is invented. The newest day of the run wins, so the
+  // answer does not depend on the order the swipe rows arrive in.
+  const swiped = [
+    {
+      LocalDate: "2026-10-06", PeopleID: 31, EmployeeID: "E-1031", Firstname: "Nia", Lastname: "Eze", Department: "Ops",
+      CardNumber: 8888, FirstEntry: "08:10:00", LastEntry: "16:10:00", DurationMin: 480, AccessCount: 2,
+    },
+    {
+      LocalDate: "2026-10-05", PeopleID: 31, EmployeeID: "E-1031", Firstname: "Nia", Lastname: "Eze", Department: "Ops",
+      CardNumber: 7777, FirstEntry: "08:00:00", LastEntry: "16:00:00", DurationMin: 480, AccessCount: 2,
+    },
+  ];
+  const people = [
+    { PeopleID: 31, EmployeeID: null, Firstname: "Nia", Lastname: "Eze", Department: "Ops", CardNumber: null },
+    // Same run, no swipe at all: nothing to fill from, so both cells keep the em dash.
+    { PeopleID: 32, EmployeeID: "  ", Firstname: "Sol", Lastname: "Eze", Department: "Ops", CardNumber: "0" },
+  ];
+  const calls = [];
+  const queryFn = async (sql, params) => {
+    calls.push({ sql, params });
+    if (/INFORMATION_SCHEMA/.test(sql)) {
+      return [{ name: "EventUTCTime", kind: "datetime" }, { name: "EmployeeID", kind: "nvarchar" }];
+    }
+    if (/IsActive/.test(sql)) return people;
+    return swiped.filter((r) => Number(r.LocalDate.replace(/-/g, "")) >= params.startYmd);
+  };
+
+  const out = await attendance.run({ mode: "range", start: "2026-10-05", end: "2026-10-07" }, { tz: 1, queryFn, now: NOW });
+  assert.equal(calls.length, 3);
+  assert.deepEqual(out.map((r) => [r.date, r.name, r.status, r.idNumber, r.cardNumber]), [
+    ["2026-10-05", "Eze Nia", "Present", "E-1031", 7777], // the day's own card, never the known one
+    ["2026-10-06", "Eze Nia", "Present", "E-1031", 8888], // …and the same person's other day keeps its own
+    ["2026-10-05", "Eze Sol", "Absent", "—", "—"],
+    ["2026-10-06", "Eze Sol", "Absent", "—", "—"],
+    ["2026-10-07", "Eze Nia", "Absent", "E-1031", 8888], // the newest card another day of this run showed
+    ["2026-10-07", "Eze Sol", "Absent", "—", "—"],
+  ]);
+});
+
 test("a database without EmployeeID shows and filters PeopleID, and still matches absences on it", async () => {
   assert.equal(await readEmployeeIdColumn(async () => [
     { name: "EventUTCTime", kind: "datetime" },
@@ -677,7 +849,7 @@ test("a database without EmployeeID shows and filters PeopleID, and still matche
     if (/INFORMATION_SCHEMA/.test(sql)) return [{ name: "EventUTCTime", kind: "datetime" }];
     const aliased = /AS EmployeeID/.test(sql);
     if (/IsActive/.test(sql)) {
-      assert.equal(sql, rosterSqlFor("PeopleID"));
+      assert.equal(sql, rosterSqlFor("PeopleID", "datetime")); // the catalog said datetime
       return roster.map((person) => (aliased ? { ...person, EmployeeID: person.PeopleID } : person));
     }
     assert.equal(sql, statementFor("datetime", "PeopleID"));
@@ -735,12 +907,28 @@ test("with no eligible employees and no swipes the report is empty, not an error
 });
 
 test("absentRows needs no database and respects the cut-off and the weekend setting", () => {
-  const people = [{ key: "7", name: "Obi Ada", idNumber: 7, department: "Ops" }];
+  const people = [{ key: "7", name: "Obi Ada", idNumber: 7, cardNumber: 1234, department: "Ops" }];
   const none = new Set();
   // 10 and 11 Oct 2026 are a Saturday and a Sunday; 12 Oct is today.
   const week = absentRows({ start: "2026-10-09", end: "2026-10-13", today: "2026-10-12", roster: people, presentKeys: none });
   assert.deepEqual(week.map((r) => r.date), ["2026-10-09", "2026-10-10", "2026-10-11", "2026-10-12"]);
   assert.equal(week.every((r) => r.status === "Absent"), true);
+  // The roster's card is what an absent day shows; a person with no usable one keeps the em dash,
+  // and the swipe columns stay empty because the day has no swipe.
+  assert.equal(week.every((r) => r.cardNumber === 1234 && r.idNumber === 7), true);
+  assert.deepEqual(Object.keys(week[0]), [
+    "date", "day", "name", "idNumber", "department", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount", "status",
+  ]);
+  const cardless = absentRows({
+    start: "2026-10-09", end: "2026-10-09", today: "2026-10-12", presentKeys: none,
+    roster: [
+      { key: "1", name: "A", idNumber: "—", cardNumber: undefined, department: "x" },
+      { key: "2", name: "B", idNumber: "—", cardNumber: 0, department: "x" },
+      { key: "3", name: "C", idNumber: "—", cardNumber: " 0 ", department: "x" },
+      { key: "4", name: "D", idNumber: "—", cardNumber: "", department: "x" },
+    ],
+  });
+  assert.deepEqual(cardless.map((r) => r.cardNumber), ["—", "—", "—", "—"]);
 
   const weekdays = absentRows({
     start: "2026-10-09", end: "2026-10-13", today: "2026-10-12", roster: people, presentKeys: none, skipWeekends: true,

@@ -36,6 +36,17 @@ if (!PEOPLE_COLUMNS.includes("EmployeeID")) {
  *     filter (read once per run, the same INFORMATION_SCHEMA probe as the time column). A row
  *     with no value is shown as —. Filtering p_people on the right of the LEFT JOIN makes that
  *     join effectively inner only when a filter is supplied.
+ *  5. An absent day has no swipe, so it has no card of its own — but the person usually has one
+ *     on file, and Card no. must not go blank on exactly the rows a reader is checking. The
+ *     roster statement therefore carries an OUTER APPLY that reads the latest non-zero granted
+ *     card for that PeopleID (dbo.EventHistory has no card column on p_people to read instead):
+ *     one seek per active person inside the query that already runs, not a second statement, not
+ *     a query per person and not a GROUP BY over all of EventHistory. It orders by the raw time
+ *     column when the catalog says datetime and by TRY_CONVERT(datetime2(3), …) otherwise, so a
+ *     legacy text column cannot raise 241 on the way to the newest card. A day whose swipes do
+ *     carry a usable card keeps it; a card already seen on another day of the same run fills a
+ *     blank roster card in memory, after the two queries. Neither value is ever invented: no
+ *     known card is —.
  *
  * Rows are ordered in application code, once, for the screen and the exports alike — by department,
  * then status (Present before Absent), then date, then name — which is also how they are grouped:
@@ -333,18 +344,44 @@ WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'EventHistory' AND COLUMN_NAME = 'Ev
  * text) is not eligible, so an unknown status can never produce an absence. The Employee ID
  * filter matches pp.EmployeeID (or pp.PeopleID when that column is absent) as trimmed text, the
  * same bound parameter as the swipe statement. PeopleID is still selected: it is the match key.
+ *
+ * The OUTER APPLY adds the card an absent row shows. p_people has no card column, so the latest
+ * known card is the newest granted swipe for that person: same event category, same description
+ * and same non-null non-zero card filter as the swipe statement, ordered newest first and taken
+ * one row deep. That is a seek per active person inside the roster that already runs — no second
+ * round trip, no query per person, and no GROUP BY over the whole of EventHistory. Neither the
+ * eligibility rule nor the way @idNumber is bound changes: the apply sits beside the FROM, not in
+ * the WHERE.
+ *
+ * `timeKind` is the catalog's answer for EventUTCTime, the same one the swipe statement is built
+ * from. A time-bearing column is ordered as it is; anything else (text, date-only, unreadable) is
+ * ordered through TRY_CONVERT(datetime2(3), …), which skips a value it cannot parse instead of
+ * raising 241 and failing the roster.
  */
-export function rosterSqlFor(identity = "EmployeeID") {
+const cardTimeExpr = (timeKind) => (timeKind === "datetime"
+  ? "eh.EventUTCTime"
+  : "TRY_CONVERT(datetime2(3), eh.EventUTCTime)");
+
+export function rosterSqlFor(identity = "EmployeeID", timeKind = "datetime") {
   const badge = identityExpr(identity);
   return `
-SELECT pp.PeopleID, ${badgeSelect(identity)}, pp.Firstname, pp.Lastname, pp.Department
+SELECT pp.PeopleID, ${badgeSelect(identity)}, pp.Firstname, pp.Lastname, pp.Department, card.CardNumber
 FROM dbo.p_people AS pp
+OUTER APPLY (
+  SELECT TOP (1) eh.CardNumber
+  FROM dbo.EventHistory AS eh
+  WHERE eh.PeopleID = pp.PeopleID
+    AND TRY_CONVERT(int, eh.EventCategory) = 10001
+    AND eh.EventDescription = N'Access Granted'
+    AND eh.CardNumber IS NOT NULL AND LTRIM(RTRIM(CONVERT(VARCHAR(64), eh.CardNumber))) <> '0'
+  ORDER BY ${cardTimeExpr(timeKind)} DESC
+) AS card
 WHERE TRY_CONVERT(int, pp.IsActive) = 1
   AND (@idNumber = '' OR LTRIM(RTRIM(CONVERT(VARCHAR(64), ${badge}))) = @idNumber);`;
 }
 
-/** The statement used when dbo.p_people.EmployeeID is in the catalog. */
-export const ROSTER_SQL = rosterSqlFor("EmployeeID");
+/** The statement used when dbo.p_people.EmployeeID is in the catalog and the time column is datetime. */
+export const ROSTER_SQL = rosterSqlFor("EmployeeID", "datetime");
 
 /**
  * Reads EventUTCTime's declared type once per run. Anything unreadable — no row, an error, an
@@ -442,6 +479,9 @@ export function localToday(now = new Date(), tzOffsetHours = 0) {
 /** The matching key for the same person in the swipe rows and the roster: trimmed text of PeopleID. */
 const personKey = (id) => (id === null || id === undefined ? null : String(id).trim());
 
+/** True when a value carries something to show: not null, not undefined and not blank once trimmed. */
+const hasText = (value) => value !== null && value !== undefined && String(value).trim() !== "";
+
 /** A blank badge number keeps the em dash the rest of the row already uses for "no value". */
 const displayId = (value) => {
   if (value === null || value === undefined) return "—";
@@ -450,12 +490,26 @@ const displayId = (value) => {
   return typeof value === "string" ? text : value;
 };
 
+/**
+ * A card the report can show: non-null, non-blank and not "0" after trimming — the same rule the
+ * swipe statement's card filter applies in SQL, so what a query would have skipped is never shown.
+ */
+const usableCard = (value) => hasText(value) && String(value).trim() !== "0";
+
+/** An unusable card is "—": a blank or a zero card is never printed as a number, and never guessed. */
+const displayCard = (value) => {
+  if (!usableCard(value)) return "—";
+  return typeof value === "string" ? value.trim() : value;
+};
+
 const nameOf = (row) => [row.Lastname, row.Firstname].filter(Boolean).join(" ") || "Unknown";
 
 /**
  * One row per eligible person per local day with no granted swipe. Days after `today` are left
  * out, so a future day can never show as absent. Weekends are included unless
- * ABSENCE_SKIP_WEEKENDS is set. `roster` holds { key, name, idNumber, department }.
+ * ABSENCE_SKIP_WEEKENDS is set. `roster` holds { key, name, idNumber, cardNumber, department },
+ * already resolved: an absent day has no swipe to read a card from, so the card here is the
+ * person's latest known one, and a person with none keeps "—" rather than a value made up.
  */
 export function absentRows({ start, end, today, roster, presentKeys, skipWeekends = ABSENCE_SKIP_WEEKENDS }) {
   const last = end < today ? end : today;
@@ -471,7 +525,7 @@ export function absentRows({ start, end, today, roster, presentKeys, skipWeekend
         name: person.name,
         idNumber: person.idNumber,
         department: person.department,
-        cardNumber: "—",
+        cardNumber: displayCard(person.cardNumber),
         firstEntry: "—",
         lastEntry: "—",
         duration: "—",
@@ -515,6 +569,11 @@ const sortRows = (rows) => rows.sort((a, b) =>
 /**
  * Runs the swipe query and the eligible roster for the same window and returns both sides of
  * the answer: the people who swiped (Present) and the active employees who did not (Absent).
+ *
+ * Both sides carry Employee ID and Card no. The roster is the authority for both, and the swipe
+ * rows fill a blank badge or a blank card for the same PeopleID — in memory, from rows this run
+ * already has, so a person reads the same on a Present day and on an Absent one. Nothing here
+ * queries per person and nothing invents a value: what no row knows stays "—".
  */
 export async function runPeriod(params, { tz, queryFn = query, now = new Date() } = {}) {
   const normalized = normalizeParams(params);
@@ -523,7 +582,43 @@ export async function runPeriod(params, { tz, queryFn = query, now = new Date() 
   const values = { startYmd: toYmd(start), endYmd: toYmd(end), idNumber: idNumber ?? "", tz };
 
   const swipes = await guard(() => queryFn(statementFor(timeKind, identity), values));
-  const people = await guard(() => queryFn(rosterSqlFor(identity), { idNumber: idNumber ?? "" }));
+  const people = await guard(() => queryFn(rosterSqlFor(identity, timeKind), { idNumber: idNumber ?? "" }));
+
+  // What the swipe rows of this run already say about a person: the badge they carry and the
+  // newest day a usable card was seen on, for that PeopleID. Built in memory, after the two
+  // statements above — it is not a third round trip, and it cannot widen who is eligible for
+  // anything. The newest day wins, so the answer does not depend on the order rows came back in.
+  const seenBy = new Map();
+  for (const row of swipes) {
+    const key = personKey(row.PeopleID);
+    if (!key) continue;
+    const seen = seenBy.get(key) ?? {};
+    if (!hasText(seen.idNumber) && hasText(row.EmployeeID)) seen.idNumber = row.EmployeeID;
+    const date = String(row.LocalDate ?? "");
+    if (usableCard(row.CardNumber) && (!usableCard(seen.cardNumber) || date >= String(seen.cardDate ?? ""))) {
+      seen.cardNumber = row.CardNumber;
+      seen.cardDate = date;
+    }
+    seenBy.set(key, seen);
+  }
+
+  // The roster, keyed by PeopleID: the badge and the latest known card an absent row shows.
+  const byKey = new Map();
+  for (const person of people) {
+    const key = personKey(person.PeopleID);
+    if (!key || byKey.has(key)) continue;
+    const seen = seenBy.get(key) ?? {};
+    byKey.set(key, {
+      key,
+      name: nameOf(person),
+      // The roster's EmployeeID wins; a swipe of the same PeopleID in this run fills a blank one.
+      // A value nobody has stays "—" — never PeopleID.
+      idNumber: displayId(hasText(person.EmployeeID) ? person.EmployeeID : seen.idNumber),
+      department: person.Department || "Unassigned",
+      // The roster's latest granted card wins; a card this run saw on another day fills a blank.
+      cardNumber: displayCard(usableCard(person.CardNumber) ? person.CardNumber : seen.cardNumber),
+    });
+  }
 
   // Absence matches on PeopleID, never on the displayed badge: a blank badge ("—") must not
   // collapse two people into one, and a badge number is not the key the roster shares.
@@ -533,13 +628,18 @@ export async function runPeriod(params, { tz, queryFn = query, now = new Date() 
     const date = r.LocalDate ?? start;
     const key = personKey(r.PeopleID);
     if (key) presentKeys.add(`${key}|${date}`);
+    // The same person agrees with their own absent rows: the roster fills a swipe whose badge or
+    // card is blank. A swipe whose person is missing from p_people has no roster row, so both
+    // cells stay "—" and are never filled from PeopleID.
+    const person = key ? byKey.get(key) : undefined;
     return {
       date,
       day: weekdayOf(date),
       name: nameOf(r),
-      idNumber: displayId(r.EmployeeID),
+      idNumber: hasText(r.EmployeeID) ? displayId(r.EmployeeID) : (person?.idNumber ?? "—"),
       department: r.Department || "Unassigned",
-      cardNumber: r.CardNumber,
+      // The day's own card wins; a blank or zero card falls back to the person's known one.
+      cardNumber: usableCard(r.CardNumber) ? displayCard(r.CardNumber) : (person?.cardNumber ?? "—"),
       firstEntry: r.FirstEntry,
       lastEntry: single ? "—" : r.LastEntry,
       duration: single ? "—" : `${Math.floor(r.DurationMin / 60)}h ${String(r.DurationMin % 60).padStart(2, "0")}m`,
@@ -548,18 +648,6 @@ export async function runPeriod(params, { tz, queryFn = query, now = new Date() 
     };
   });
 
-  const byKey = new Map();
-  for (const person of people) {
-    const key = personKey(person.PeopleID);
-    if (key && !byKey.has(key)) {
-      byKey.set(key, {
-        key,
-        name: nameOf(person),
-        idNumber: displayId(person.EmployeeID),
-        department: person.Department || "Unassigned",
-      });
-    }
-  }
   const absent = absentRows({
     start,
     end,
