@@ -3,7 +3,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   csvFor, emptyStateHtml, escapeHtml, exportFileName, groupByToggleHtml, isoToday,
-  paramFieldsHtml, parseQuery, resolveReportParams, sortRows, tableHtml,
+  paramFieldsHtml, parseQuery, resolveReportParams, sortRows, tableHtml, viewStateOf,
+  visibleColumns, withViewState, VIEW_KEYS,
 } from "../renderer/app/js/template.js";
 
 const report = {
@@ -312,4 +313,71 @@ test("tableHtml only claims a sort it was asked for", () => {
   const html = tableHtml({ columns, groupBy: null, rows, sort: { key: "gone", dir: "asc" } });
   assert.equal(html.includes("aria-sort"), false);
   assert.equal([...html.matchAll(/class="caret"/g)].length, 0);
+});
+
+test("the view state rides in the query string without disturbing the window", () => {
+  // A view someone can bookmark: which column it is sorted by, and whether rows are grouped.
+  assert.deepEqual(viewStateOf("?sort=name&dir=desc&group=flat"), { sort: { key: "name", dir: "desc" }, groupBy: false });
+  assert.deepEqual(viewStateOf("?sort=name&dir=asc&group=grouped"), { sort: { key: "name", dir: "asc" }, groupBy: true });
+  // Nothing said is not the same as "false".
+  assert.deepEqual(viewStateOf(""), { sort: null, groupBy: null });
+  assert.deepEqual(viewStateOf("?sort=name"), { sort: null, groupBy: null }, "a key without a direction is not a sort");
+  assert.deepEqual(viewStateOf("?sort=name&dir=sideways"), { sort: null, groupBy: null });
+  assert.deepEqual(viewStateOf("?group=sideways"), { sort: null, groupBy: null });
+
+  // Writing the view keeps whatever the link already said about the window.
+  assert.equal(withViewState("?mode=range&start=2026-10-05&end=2026-10-07", { sort: { key: "name", dir: "asc" }, groupBy: true }),
+    "?mode=range&start=2026-10-05&end=2026-10-07&sort=name&dir=asc&group=grouped");
+  // Changing it replaces rather than appends, so the address does not grow with every click.
+  assert.equal(withViewState("?mode=range&sort=name&dir=asc&group=grouped", { sort: { key: "department", dir: "desc" }, groupBy: false }),
+    "?mode=range&sort=department&dir=desc&group=flat");
+  // Clearing it takes the keys out and leaves the window alone.
+  assert.equal(withViewState("?mode=month&month=2026-10&sort=name&dir=asc", {}), "?mode=month&month=2026-10");
+  assert.equal(withViewState("", {}), "", "an empty view is an empty query, not a bare question mark");
+  // The three keys are the whole vocabulary, and they are the ones kept out of report requests.
+  assert.deepEqual([...VIEW_KEYS], ["sort", "dir", "group"]);
+});
+
+test("hiding columns can never empty the table", () => {
+  const columns = [{ key: "name", label: "Name" }, { key: "status", label: "Status" }, { key: "swipes", label: "Swipes" }];
+  assert.deepEqual(visibleColumns(columns, ["status"]).map((c) => c.key), ["name", "swipes"]);
+  assert.deepEqual(visibleColumns(columns, []).map((c) => c.key), ["name", "status", "swipes"]);
+  // A key the report does not have simply matches nothing.
+  assert.deepEqual(visibleColumns(columns, ["gone"]).map((c) => c.key), ["name", "status", "swipes"]);
+  // Asking for all of them to go returns the list untouched, rather than a table with no columns.
+  assert.deepEqual(visibleColumns(columns, ["name", "status", "swipes"]).map((c) => c.key), ["name", "status", "swipes"]);
+  assert.deepEqual(visibleColumns([], ["name"]), []);
+});
+
+test("a grouped table gives every section its own body, which is what pins a heading to it", () => {
+  const columns = [{ key: "department", label: "Department" }, { key: "name", label: "Name" }];
+  const rows = [
+    { department: "Ops", name: "Ada" },
+    { department: "Ops", name: "Ben" },
+    { department: "Security", name: "Chidi" },
+    { department: "", name: "No department" },
+  ];
+  const grouped = tableHtml({ columns, groupBy: "department", rows });
+  // A sticky heading is confined to its containing block: with one body per section the heading is
+  // pushed out by the next section instead of piling up with the others.
+  const bodies = grouped.match(/<tbody>[\s\S]*?<\/tbody>/g);
+  assert.equal(bodies.length, 3, "one body per section");
+  assert.deepEqual(bodies.map((b) => b.match(/<tr class="grp"><td colspan="2">([^<]*)</)?.[1]),
+    ["Ops (2)", "Security (1)", undefined],
+    "each named section opens with its heading, and a row with no department gets a body without one");
+  assert.match(grouped, /^<table class="grouped">/, "the table says which shape it is");
+
+  // Flat is one body, and there is no heading to confine.
+  const flat = tableHtml({ columns, groupBy: null, rows });
+  assert.equal(flat.match(/<tbody>/g).length, 1);
+  assert.equal(flat.includes('class="grp"'), false);
+  assert.match(flat, /^<table>/);
+
+  // A value the report left out is a blank cell, not the word "null".
+  const withHoles = tableHtml({ columns, groupBy: null, rows: [{ department: null, name: undefined }] });
+  assert.match(withHoles, /<tr><td class=""><\/td><td class=""><\/td><\/tr>/);
+  assert.equal(withHoles.includes("null"), false);
+  // Zero is a value, and stays one.
+  const zeroes = tableHtml({ columns, groupBy: null, rows: [{ department: 0, name: "Zero" }] });
+  assert.match(zeroes, /<td class="">0<\/td>/);
 });

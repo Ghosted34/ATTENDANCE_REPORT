@@ -72,6 +72,48 @@ export function resolveReportParams(report, { query = parseQuery(location.search
 }
 
 /**
+ * The keys that describe *how* a report is being read rather than *what* it asked the database
+ * for: which column it is ordered by, and whether the rows are grouped. They live in the URL so a
+ * view can be bookmarked and shared, and they are kept out of what travels to the report — a
+ * report is asked about a window, not about a sort.
+ */
+export const VIEW_KEYS = Object.freeze(["sort", "dir", "group"]);
+
+/** The view a query string asks for. `null` means "not specified here", not "false". */
+export function viewStateOf(search = "") {
+  const query = search instanceof URLSearchParams ? search : parseQuery(search);
+  const dir = query.get("dir") === "desc" ? "desc" : query.get("dir") === "asc" ? "asc" : null;
+  const key = (query.get("sort") || "").trim();
+  const group = query.get("group");
+  return {
+    sort: key && dir ? { key, dir } : null,
+    groupBy: group === "grouped" ? true : group === "flat" ? false : null,
+  };
+}
+
+/** The same query string with the view state written into it, or taken out of it. */
+export function withViewState(search = "", { sort = null, groupBy = null } = {}) {
+  const params = search instanceof URLSearchParams ? search : parseQuery(search);
+  for (const key of VIEW_KEYS) params.delete(key);
+  if (sort?.key && (sort.dir === "asc" || sort.dir === "desc")) {
+    params.set("sort", sort.key);
+    params.set("dir", sort.dir);
+  }
+  if (groupBy === true || groupBy === false) params.set("group", groupBy ? "grouped" : "flat");
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
+/**
+ * The columns a reader has left visible. Hiding is a view preference, so it can never empty the
+ * table: asking for all of them to go returns the list untouched.
+ */
+export function visibleColumns(columns = [], hidden = []) {
+  const shown = columns.filter((column) => !hidden.includes(column.key));
+  return shown.length ? shown : columns;
+}
+
+/**
  * The toolbar fields for a report, pre-filled from `values`. A caller that draws a field itself —
  * the report screen renders the mode as a segmented control with its own hidden input — names it in
  * `omit`, so the field is left out before it is rendered rather than patched out of the markup.
@@ -200,6 +242,8 @@ export function tableHtml({ columns, groupBy, rows, statusPill = defaultStatusPi
   const sorted = (list) => (sort ? sortRows(list, sort) : list);
   const cells = (row, tag) => columns.map((c) => {
     let value = row[c.key];
+    // A value the report never filled in is a blank cell, not the word "null".
+    if (value === null || value === undefined) value = "";
     // Apply status pill to status column if a custom renderer is provided
     if (c.key === "status" && statusPill !== defaultStatusPill) {
       value = statusPill(value);
@@ -217,6 +261,8 @@ export function tableHtml({ columns, groupBy, rows, statusPill = defaultStatusPi
       `${escapeHtml(c.label)}${caret}</button></th>`;
   }).join("")}</tr></thead>`;
   const line = (row) => `<tr>${cells(row, "td")}</tr>`;
+  // Each section is its own `<tbody>`, which is what confines the sticky heading to the rows it
+  // names: it is pushed out by the next department rather than piling up with the others.
   let body = "";
   if (groupBy) {
     for (const [name, list] of sectionsOf(rows, groupBy)) {
@@ -225,18 +271,19 @@ export function tableHtml({ columns, groupBy, rows, statusPill = defaultStatusPi
       const ordered = sorted(list);
       // A null name means the row has no value for the grouping column: the rows still show, with
       // no heading — the same rule server/reports/export.js follows.
-      body += (name === null ? "" : `<tr class="grp"><td colspan="${columns.length}">${escapeHtml(name)} (${ordered.length})</td></tr>`) +
-        ordered.map(line).join("");
+      body += "<tbody>" +
+        (name === null ? "" : `<tr class="grp"><td colspan="${columns.length}">${escapeHtml(name)} (${ordered.length})</td></tr>`) +
+        ordered.map(line).join("") + "</tbody>";
     }
   } else {
-    body = sorted(rows).map(line).join("");
+    body = `<tbody>${sorted(rows).map(line).join("")}</tbody>`;
   }
 
   // The caption is the table's accessible name: it is announced once, and it is what the
   // `scope` attributes are read against. An aria-label alongside it would say it all twice.
   const caption = groupBy ? `Report grouped by ${Array.isArray(groupBy) ? groupBy.join(" and ") : groupBy}` : "Report";
 
-  return `<table><caption class="sr-only">${caption}</caption>${head}<tbody>${body}</tbody></table>`;
+  return `<table${groupBy ? ' class="grouped"' : ""}><caption class="sr-only">${caption}</caption>${head}${body}</table>`;
 }
 
 /** Joins the parts of a composite heading ("Front Desk — Present"), matching server/reports/export.js. */

@@ -122,3 +122,41 @@ test("the app icon exists, is big enough for the installer, and is wired into th
   assert.ok(fs.existsSync(icon), `electron-builder points at ${builder.icon}, which exists`);
   assert.equal(path.relative(root, icon).replace(/\\/g, "/"), "assets/icon.png");
 });
+
+test("a group heading sticks under the header, and never on paper", () => {
+  // A 31-day grouped report scrolls past its heading; the heading is worth keeping in view, and it
+  // has to sit exactly under the sticky column header or it will cover the row above it.
+  const row = cssRules.match(/tr\.grp td \{([^}]*)\}/);
+  assert.ok(row, "the group heading rule is still there");
+  assert.match(row[1], /position:\s*sticky/);
+  assert.match(row[1], /top:\s*var\(--table-row-height\)/,
+    "the offset is the header's own height, which changes with the density");
+  const header = cssRules.match(/\nth \{([^}]*)\}/);
+  assert.match(header[1], /position:\s*sticky/, "the header it hides under is sticky too");
+  assert.match(header[1], /top:\s*0/);
+
+  // A group heading is one cell spanning the row, so it is also `td:first-child` — the frozen
+  // column — which would otherwise paint the scrolling rows on top of the heading labelling them.
+  const frozen = cssRules.match(/td:first-child \{[^}]*z-index:\s*(\d+)/);
+  const heading = cssRules.match(/tr\.grp td:first-child \{[^}]*z-index:\s*(\d+)/);
+  assert.ok(frozen && heading, "both stacking orders are stated");
+  assert.ok(Number(heading[1]) > Number(frozen[1]),
+    `the heading sits above the rows (${heading[1]} > ${frozen[1]})`);
+  const headerZ = cssRules.match(/\nth \{[^}]*z-index:\s*(\d+)/);
+  assert.ok(Number(headerZ[1]) > Number(heading[1]),
+    `and under the column header (${headerZ[1]} > ${heading[1]})`);
+
+  // The rows a reader cannot see are skipped, and a grouped body is guessed at about a section's
+  // height rather than the whole table's, so the scrollbar does not promise what is not there.
+  const tableGuess = cssRules.match(/\.table-wrap tbody \{[^}]*contain-intrinsic-size:\s*auto\s+(\d+)px/);
+  const sectionGuess = cssRules.match(/\.table-wrap table\.grouped tbody \{[^}]*contain-intrinsic-size:\s*auto\s+(\d+)px/);
+  assert.match(cssRules, /\.table-wrap tbody \{[^}]*content-visibility:\s*auto/, "the hint is still there");
+  assert.ok(tableGuess && sectionGuess, "both bodies state their guess");
+  assert.ok(Number(sectionGuess[1]) < Number(tableGuess[1]),
+    `a section is guessed smaller than a whole table (${sectionGuess[1]} < ${tableGuess[1]})`);
+
+  // Print has no viewport: the rule is undone, along with the header's own stickiness.
+  const print = cssRules.slice(cssRules.indexOf("@media print"));
+  assert.match(print, /tr\.grp td \{\s*position:\s*static\s*!important/,
+    "a printed heading does not pin itself to the top of the page");
+});

@@ -749,6 +749,10 @@ main.report {
   flex: 1;
   min-width: 100px;
 }
+.toolbar .field.columns-field {
+  /* The Columns button is as wide as its label, not as wide as a date field. */
+  width: auto;
+}
 
 /* Segmented control for mode selection */
 .segmented-control {
@@ -804,6 +808,76 @@ main.report {
 
 .segmented-control button[aria-pressed="true"]:hover {
   background: var(--accent);
+}
+
+/* -------------------------------------------------------------------------------
+   Columns menu — the disclosure in the toolbar. A panel that floats over the table,
+   so it is positioned; the rows inside it are the switches.
+   ------------------------------------------------------------------------------- */
+
+.columns-menu {
+  position: relative;
+}
+
+.columns-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + var(--sp-2));
+  z-index: 30;
+  width: 220px;
+  padding: var(--sp-2);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-2);
+}
+
+.columns-title {
+  padding: var(--sp-1) var(--sp-2);
+  font-size: var(--text-meta);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--ink-2);
+}
+
+.columns-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.columns-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: var(--sp-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-body);
+  font-weight: 400;
+  color: var(--ink-1);
+  cursor: pointer;
+}
+
+.columns-item:hover {
+  background: var(--surface-2);
+}
+
+/* A checkbox here is a switch, not a value to read: it keeps its native box, sized to the row. */
+.columns-item input {
+  width: auto;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.columns-note {
+  margin-top: var(--sp-1);
+  padding: var(--sp-2);
+  border-top: 1px solid var(--line);
+  font-size: var(--text-meta);
+  color: var(--ink-2);
 }
 
 /* =============================================================================
@@ -1032,6 +1106,11 @@ tbody tr:hover td {
 
 /* Group heading rows */
 tr.grp td {
+  /* The heading of the section you are reading sits under the column headers rather than
+     scrolling away, which is what keeps a 31-day grouped report legible. */
+  position: sticky;
+  top: var(--table-row-height);
+  z-index: 7;
   background: var(--surface-2) !important;
   font-weight: 600;
   font-size: var(--text-meta);
@@ -1061,6 +1140,15 @@ td:first-child {
 
 th:first-child {
   background: var(--surface-2);
+}
+
+/*
+ * A group heading is a single cell spanning the row, so it is also the first child — and the rule
+ * above would put it *under* the rows it is labelling as they scroll past. Named here, after that
+ * rule, with the specificity to win: above the rows, still below the header.
+ */
+tr.grp td:first-child {
+  z-index: 7;
 }
 
 /* Shadow for frozen column when scrolling */
@@ -1409,6 +1497,11 @@ td:not(.wrap):not(:first-child) {
     display: none;
   }
 
+  /* A sticky heading is for a viewport; paper has none. */
+  tr.grp td {
+    position: static !important;
+  }
+
   table {
     font-size: 14px;
   }
@@ -1477,5 +1570,12 @@ td:not(.wrap):not(:first-child) {
    it asks for a compositing layer per row. */
 .table-wrap tbody {
   content-visibility: auto;
+  /* The guess for a body nothing has rendered yet: here it is the whole table. */
   contain-intrinsic-size: auto 1000px;
+}
+
+/* Grouped, each body is a department — the heading and its rows. The guess is a section, not the
+   whole table, so the scrollbar does not promise thousands of pixels that are not there. */
+.table-wrap table.grouped tbody {
+  contain-intrinsic-size: auto 400px;
 }
