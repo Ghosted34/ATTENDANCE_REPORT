@@ -455,20 +455,127 @@ textarea {
    PANELS & CARDS
    ============================================================================ */
 
-.panel {
+/* =============================================================================
+   SIGN IN
+   ============================================================================ */
+
+/* The card sits in the middle of the space below the top bar. `margin: auto` on the stack
+   centres it without cutting off its top when the window is short: auto margins collapse to
+   zero instead of overflowing, and the page scrolls. */
+.auth {
+  max-width: none;
+  min-height: calc(100vh - var(--header-height));
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-8) var(--sp-4);
+}
+
+.auth-stack {
   width: 100%;
-  max-width: 340px;
-  margin: 12vh auto 0;
-  padding: var(--sp-8) var(--sp-6);
+  max-width: 380px;
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.auth-card {
+  padding: var(--sp-8);
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-2);
 }
 
-.panel h1 {
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
   margin-bottom: var(--sp-6);
+}
+
+/* Monogram: the product's initials, standing in for a logo asset. */
+.brand-mark {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: var(--text-hint);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.auth-app {
+  font-size: var(--text-emph);
+  font-weight: 600;
+}
+
+.auth-title {
+  margin-bottom: var(--sp-1);
+}
+
+.auth-sub {
+  color: var(--ink-2);
+  font-size: var(--text-body);
+  margin-bottom: var(--sp-6);
+}
+
+/* Reveal control, sitting inside the password field. */
+.input-affix {
+  position: relative;
+}
+
+.input-affix input {
+  padding-right: 40px;
+}
+
+.input-affix .reveal {
+  position: absolute;
+  top: 50%;
+  right: var(--sp-1);
+  transform: translateY(-50%);
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.input-affix .reveal:hover {
+  background: var(--surface-2);
+  color: var(--ink-1);
+}
+
+.auth-submit {
+  width: 100%;
+}
+
+.auth-note {
   text-align: center;
+  font-size: var(--text-meta);
+  color: var(--ink-3);
+}
+
+.auth-note code {
+  font-size: inherit;
+  color: var(--ink-2);
+}
+
+@media (max-width: 420px) {
+  .auth-card {
+    padding: var(--sp-6);
+  }
 }
 
 .list {

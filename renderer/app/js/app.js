@@ -6,6 +6,8 @@ import {
 const $ = (s) => document.querySelector(s);
 const view = $("#view");
 let token = null, reportList = [];
+// The product name from /api/meta; the sign-in card shows it before anything else loads.
+let appName = "Reports";
 const PERIOD_WORDS = { single: "date", range: "date range", month: "month" };
 
 async function api(path, opts = {}) {
@@ -61,22 +63,124 @@ function formatSummary(summary) {
 }
 
 /* ---------- Views ---------- */
+
+/** Up to two initials for the sign-in card's mark: "Reports Desk" -> "RD". */
+const initialsOf = (name) =>
+  (String(name).match(/[A-Za-z0-9]+/g) || ["R"]).slice(0, 2).map((word) => word[0].toUpperCase()).join("");
+
+// Eye and eye-off, in two states of the same geometry (the widely used Lucide outlines).
+const EYE = (paths) =>
+  `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75"` +
+  ` stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+const EYE_SHOW = EYE('<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>');
+const EYE_HIDE = EYE('<path d="M2 2l20 20"/><path d="M6.61 6.61A13.5 13.5 0 0 0 2 12s3 7 10 7a9.7 9.7 0 0 0 5.39-1.61"/><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.4 10.4 0 0 1 12 5c7 0 10 7 10 7a13.2 13.2 0 0 1-1.67 2.68"/>');
+
+/**
+ * Sign in: one card, two fields, one button.
+ *
+ * The card carries the product mark and name, the fields carry the autocomplete hints a password
+ * manager needs, the password has a reveal control, and the submit button reports progress instead
+ * of going quiet. Failures surface in the one place the eye is already resting — above the button —
+ * with `aria-invalid` on both fields, and the error clears as soon as the user starts fixing it.
+ */
 function loginView() {
-  view.innerHTML = `<form class="panel" id="f">
-    <h1>Sign in</h1>
-    <div class="field"><label for="u">Username</label><input id="u" autocomplete="username" required autofocus></div>
-    <div class="field"><label for="p">Password</label><input id="p" type="password" autocomplete="current-password" required></div>
-    <div class="msg err" id="m" role="alert"></div>
-    <button class="btn primary" style="width:100%">Sign in</button>
-    <p class="hint" style="margin-top:var(--sp-4);text-align:center">Temporary sign-in: admin / admin</p></form>`;
-  $("#f").onsubmit = async (e) => {
+  view.innerHTML = `<main class="auth">
+    <div class="auth-stack">
+      <form class="auth-card" id="f">
+        <div class="auth-brand">
+          <span class="brand-mark" aria-hidden="true">${esc(initialsOf(appName))}</span>
+          <span class="auth-app">${esc(appName)}</span>
+        </div>
+        <h1 class="auth-title">Sign in</h1>
+        <p class="auth-sub">Enter your username and password to continue.</p>
+
+        <div class="field">
+          <label for="u">Username</label>
+          <input id="u" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
+        </div>
+
+        <div class="field">
+          <label for="p">Password</label>
+          <div class="input-affix">
+            <input id="p" name="password" type="password" autocomplete="current-password" required aria-describedby="caps">
+            <button type="button" class="reveal" id="reveal" aria-label="Show password" aria-pressed="false">${EYE_SHOW}</button>
+          </div>
+          <p class="hint hidden" id="caps" role="status">Caps Lock is on.</p>
+        </div>
+
+        <div class="msg" id="m" role="alert"></div>
+
+        <button class="btn primary auth-submit" id="sub" type="submit">
+          <span id="subText">Sign in</span>
+          <span class="spinner hidden" id="subSpin"></span>
+        </button>
+      </form>
+      <p class="auth-note">Local development build — sign in with <code>admin</code> / <code>admin</code></p>
+    </div>
+  </main>`;
+
+  const form = $("#f"), user = $("#u"), pass = $("#p"), msg = $("#m");
+  const submit = $("#sub"), submitText = $("#subText"), submitSpinner = $("#subSpin");
+  const reveal = $("#reveal"), caps = $("#caps");
+
+  const setError = (text) => {
+    msg.textContent = text;
+    // The red box only exists while there is something wrong. Both fields are handed back to the
+    // user marked invalid: which of the pair was wrong is exactly what the server does not say.
+    msg.className = text ? "msg err" : "msg";
+    user.setAttribute("aria-invalid", String(Boolean(text)));
+    pass.setAttribute("aria-invalid", String(Boolean(text)));
+    if (text) (user.value ? pass : user).focus();
+  };
+
+  // The error belongs to the attempt that produced it: typing clears it.
+  const clearError = () => { if (msg.textContent) setError(""); };
+  user.addEventListener("input", clearError);
+  pass.addEventListener("input", clearError);
+
+  // Caps Lock is the most common reason a correct password is refused.
+  const syncCaps = (event) => {
+    const on = typeof event.getModifierState === "function" && event.getModifierState("CapsLock");
+    caps.classList.toggle("hidden", !on);
+  };
+  pass.addEventListener("keydown", syncCaps);
+  pass.addEventListener("keyup", syncCaps);
+  pass.addEventListener("blur", () => caps.classList.add("hidden"));
+
+  reveal.addEventListener("click", () => {
+    const hiding = pass.type === "text";
+    pass.type = hiding ? "password" : "text";
+    const label = hiding ? "Show password" : "Hide password";
+    reveal.setAttribute("aria-pressed", String(!hiding));
+    reveal.setAttribute("aria-label", label);
+    reveal.innerHTML = hiding ? EYE_SHOW : EYE_HIDE;
+    pass.focus();
+  });
+
+  form.onsubmit = async (e) => {
     e.preventDefault();
+    if (submit.disabled) return; // one attempt at a time
+    setError("");
+    submit.disabled = true;
+    submit.setAttribute("aria-busy", "true");
+    submitText.textContent = "Signing in";
+    submitSpinner.classList.remove("hidden");
     try {
-      const res = await api("/auth/login", { method: "POST", body: JSON.stringify({ username: $("#u").value, password: $("#p").value }) });
+      const res = await api("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ username: user.value.trim(), password: pass.value }),
+      });
       token = (await res.json()).token;
       reportList = await (await api("/reports")).json();
       go("reports");
-    } catch (err) { $("#m").textContent = err.message; }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      submit.disabled = false;
+      submit.removeAttribute("aria-busy");
+      submitText.textContent = "Sign in";
+      submitSpinner.classList.add("hidden");
+    }
   };
 }
 
@@ -399,7 +503,14 @@ function reportView(id) {
 function route() {
   const [, page, id] = location.hash.split("/");
   $("#signOut").classList.toggle("hidden", !token);
-  if (!token) { if (page !== "login") return go("login"); return loginView(); }
+  // Row height only means something where there is a table to set it for.
+  densityBtn?.classList.toggle("hidden", !token);
+  if (!token) {
+    if (page !== "login") return go("login");
+    document.title = `Sign in \u00b7 ${appName}`;
+    return loginView();
+  }
+  document.title = appName;
   if (page === "reports" && id) return reportView(id);
   if (page === "reports") return homeView();
   go("reports");
@@ -422,5 +533,5 @@ if (densityBtn) {
 $("#signOut").onclick = () => { token = null; reportList = []; go("login"); };
 addEventListener("hashchange", route);
 fetch("/api/meta").then((r) => r.json()).then(({ name }) => {
-  $("#brand").textContent = name; document.title = name;
+  appName = name; $("#brand").textContent = name; document.title = name;
 }).finally(route);
