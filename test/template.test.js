@@ -2,8 +2,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  csvFor, escapeHtml, exportFileName, isoToday, paramFieldsHtml, parseQuery,
-  resolveReportParams, tableHtml,
+  csvFor, emptyStateHtml, escapeHtml, exportFileName, groupByToggleHtml, isoToday,
+  paramFieldsHtml, parseQuery, resolveReportParams, tableHtml,
 } from "../renderer/app/js/template.js";
 
 const report = {
@@ -165,4 +165,61 @@ test("month fields render as a month input, default to the current month and nam
   assert.equal(exportFileName("attendance", { mode: "month", month: "2026-10" }, "pdf"), "attendance-2026-10.pdf");
   assert.equal(exportFileName("absentees", { mode: "month", month: "2026-02" }, "csv"), "absentees-2026-02.csv");
   assert.equal(exportFileName("absentees", { mode: "single", date: "2026-10-05" }, "xlsx"), "absentees-2026-10-05.xlsx");
+});
+
+test("groupByToggleHtml marks one option as pressed and names both outcomes", () => {
+  const grouped = groupByToggleHtml(true);
+  // The active option is the one the table follows, and only it is pressed.
+  assert.match(grouped, /data-groupby="true" aria-pressed="true" aria-current="true"[^>]*>[\s\S]*?<span>By Dept<\/span>/);
+  assert.match(grouped, /data-groupby="false" aria-pressed="false" aria-current="false"[^>]*>[\s\S]*?<span>All Together<\/span>/);
+  // Both options are buttons in one labelled group, each with an icon and a tooltip.
+  assert.match(grouped, /role="group" aria-label="Row grouping"/);
+  assert.equal([...grouped.matchAll(/<button type="button"/g)].length, 2);
+  assert.equal([...grouped.matchAll(/class="seg-icon"/g)].length, 2);
+  assert.match(grouped, /data-tooltip="Group rows under a heading per department"/);
+  assert.match(grouped, /data-tooltip="One flat list of every row"/);
+
+  // Flipping the preference moves the pressed state to the flat option.
+  const flat = groupByToggleHtml(false);
+  assert.match(flat, /data-groupby="false" aria-pressed="true" aria-current="true"/);
+  assert.match(flat, /data-groupby="true" aria-pressed="false" aria-current="false"/);
+});
+
+test("emptyStateHtml offers the next step for the period that came back empty", () => {
+  const withAbsentees = emptyStateHtml({ period: "date range", canRunAbsentees: true });
+  assert.match(withAbsentees, /No records for this date range/);
+  assert.match(withAbsentees, /Try another date range, or run the Absentees report for the same window\./);
+  assert.match(withAbsentees, /data-empty-action="absentees">Try Absentees</);
+  assert.match(withAbsentees, /data-empty-action="date">Change Date</);
+  assert.match(withAbsentees, /role="status"/);
+
+  // A month is changed in months, and the day counts stay out of it.
+  const month = emptyStateHtml({ period: "month", canRunAbsentees: true });
+  assert.match(month, /data-empty-action="date">Change Month</);
+
+  // On the Absentees report itself (or one that is not registered) the button is not offered.
+  const alone = emptyStateHtml({ period: "date", canRunAbsentees: false });
+  assert.equal(alone.includes("Try Absentees"), false);
+  assert.equal(alone.includes("data-empty-action=\"absentees\""), false);
+  assert.match(alone, /<p>Try another date\.<\/p>/);
+  assert.match(alone, /data-empty-action="date">Change Date</);
+
+  // The defaults are the single-date wording, so a caller can pass nothing.
+  assert.match(emptyStateHtml(), /No records for this date/);
+});
+
+test("paramFieldsHtml omits the fields the caller draws itself", () => {
+  const values = { mode: "range", start: "2026-08-16", end: "2026-08-19", date: "2026-08-16", idNumber: "" };
+  // The report screen renders the mode as a segmented control plus a hidden input of its own; the
+  // mode field must be left out entirely, or the form would submit "mode" twice and the report
+  // would reject the request with "Choose \"Single date\", \"Date range\" or \"Month\".".
+  const html = paramFieldsHtml(report, values, { omit: ["mode"] });
+  assert.equal(html.includes('name="mode"'), false);
+  assert.equal(html.includes('for="p_mode"'), false);
+  assert.equal(html.includes("<select"), false);
+  // The other fields are untouched, and nothing is omitted by default.
+  assert.match(html, /<input id="p_date" name="date" type="date"/);
+  assert.match(html, /<input id="p_idNumber" name="idNumber" type="text"/);
+  assert.equal(paramFieldsHtml(report, values).includes('name="mode"'), true);
+  assert.equal(paramFieldsHtml(report, values, { omit: [] }).includes('name="mode"'), true);
 });

@@ -11,8 +11,10 @@ Reports Desk uses a clean, tool-grade design inspired by Linear and Vercel dashb
 - **Subtle hierarchy:** 1px borders instead of shadows, 4-8px radii, minimal elevation
 - **Table craft:** Sticky header and frozen first column, subtle zebra striping (3-5% tint), row hover states, tabular-numeric alignment for numbers
 - **Status without color:** Present/Absent shown as small pills with inline SVG icons plus text labels
-- **States:** Clear not-run, running (with progress bar and spinner), empty, and error states
-- **Density toggle:** Comfortable (40px) or compact (32px) row heights, persisted via cookie
+- **One switch per choice:** The period is a segmented control (Single date / Date range / Month) that mirrors the report's own `mode` field, and the table is switched between **By Dept** and **All Together** from the toolbar with icons and tooltips
+- **States:** Clear not-run, running (with progress bar and spinner), empty, and error states — the empty state names the period that came back empty and offers the next step (**Try Absentees** carries the same window across, **Change Date**/Change Month returns to the field)
+- **Exports that confirm:** A saved Excel, CSV or PDF file answers with a checkmark in the header and on the button itself
+- **Density toggle:** Comfortable (40px) or compact (32px) row heights from the top bar, persisted via cookie
 - **Accessibility:** WCAG 2.2 AA compliant with proper focus rings, aria-live regions, table semantics (caption, scope attributes)
 
 All styling uses semantic design tokens defined in `renderer/app/css/styles.css` for both light and dark themes.

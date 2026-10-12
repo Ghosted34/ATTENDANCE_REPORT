@@ -71,9 +71,13 @@ export function resolveReportParams(report, { query = parseQuery(location.search
   return { values, extra };
 }
 
-/** The toolbar fields for a report, pre-filled from `values`. */
-export function paramFieldsHtml(report, values = {}) {
-  return (report.params || []).map((p) => {
+/**
+ * The toolbar fields for a report, pre-filled from `values`. A caller that draws a field itself —
+ * the report screen renders the mode as a segmented control with its own hidden input — names it in
+ * `omit`, so the field is left out before it is rendered rather than patched out of the markup.
+ */
+export function paramFieldsHtml(report, values = {}, { omit = [] } = {}) {
+  return (report.params || []).filter((p) => !omit.includes(p.name)).map((p) => {
     const id = `p_${p.name}`;
     const scope = p.mode ? ` data-mode="${escapeHtml(p.mode)}"` : "";
     const label = `<label for="${id}">${escapeHtml(p.label)}</label>`;
@@ -97,6 +101,59 @@ export function paramFieldsHtml(report, values = {}) {
 export function defaultStatusPill(status) {
   const label = escapeHtml(status);
   return label;
+}
+
+/* Inline icons for the toolbar and the states. Decorative only: every control they sit in
+   carries its own text label, so they are hidden from assistive technology. */
+const ICON = (paths, size = 14) =>
+  `<svg class="seg-icon" viewBox="0 0 24 24" width="${size}" height="${size}" fill="none"` +
+  ` stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"` +
+  ` aria-hidden="true">${paths}</svg>`;
+
+/** Stacked layers — rows gathered under a department heading. */
+export const ICON_GROUPED = ICON('<path d="M12 3 3 7.5l9 4.5 9-4.5L12 3Z"/><path d="m3 12.4 9 4.5 9-4.5"/><path d="m3 16.9 9 4.5 9-4.5"/>');
+
+/** Even rows — one flat list. */
+export const ICON_FLAT = ICON('<path d="M3 6h18M3 12h18M3 18h18"/>');
+
+/**
+ * The Grouped/Flat switch at the end of the toolbar: whether the table keeps a heading and a
+ * count per department, or lists every row in one run. Labels name the *outcome* ("By Dept",
+ * "All Together") rather than the mechanism, and each option carries an icon and a tooltip.
+ */
+export function groupByToggleHtml(useGroupBy = true) {
+  const active = (value) => (value === Boolean(useGroupBy) ? "true" : "false");
+  const option = (value, label, tooltip, icon) =>
+    `<button type="button" class="btn" data-groupby="${value}"` +
+    ` aria-pressed="${active(value)}" aria-current="${active(value)}" data-tooltip="${escapeHtml(tooltip)}">` +
+    `${icon}<span>${escapeHtml(label)}</span></button>`;
+  return `<div class="segmented-control" id="groupByToggle" role="group" aria-label="Row grouping" style="width:auto">` +
+    option(true, "By Dept", "Group rows under a heading per department", ICON_GROUPED) +
+    option(false, "All Together", "One flat list of every row", ICON_FLAT) +
+    `</div>`;
+}
+
+/**
+ * The empty state for a run that came back with no rows: what happened, and the two things
+ * worth doing next — open the same window on the Absentees report (`canRunAbsentees`, false on
+ * that report itself and on a deployment that does not offer it), or pick another period.
+ */
+export function emptyStateHtml({ period = "date", canRunAbsentees = false } = {}) {
+  const word = escapeHtml(period);
+  const changeLabel = period === "month" ? "Change Month" : "Change Date";
+  const next = canRunAbsentees
+    ? `<p>Try another ${word}, or run the Absentees report for the same window.</p>`
+    : `<p>Try another ${word}.</p>`;
+  const actions = [
+    canRunAbsentees ? '<button type="button" class="btn" data-empty-action="absentees">Try Absentees</button>' : "",
+    `<button type="button" class="btn" data-empty-action="date">${changeLabel}</button>`,
+  ].filter(Boolean).join("");
+  return `<div class="empty" role="status">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 9h6v6H9z"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg>
+    <h3>No records for this ${word}</h3>
+    ${next}
+    <div class="empty-actions">${actions}</div>
+  </div>`;
 }
 
 /** The results table: sticky head, group headings, right-aligned and wrapping cells. */

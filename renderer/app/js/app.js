@@ -1,5 +1,6 @@
 import {
   escapeHtml as esc, exportFileName, paramFieldsHtml, resolveReportParams, tableHtml,
+  groupByToggleHtml, emptyStateHtml,
 } from "./template.js";
 
 const $ = (s) => document.querySelector(s);
@@ -105,7 +106,9 @@ function reportView(id) {
     </button>`
   ).join("");
 
-  // Build the mode field (hidden select for form submission)
+  // The mode travels as a hidden input: the segmented control above draws it and keeps this in
+  // step, and `paramFieldsHtml` is told to omit the field so no second mode input can reach the
+  // server (a duplicate would arrive at the report as "single,single" and fail validation).
   const modeSelect = r.params?.find(p => p.name === "mode")
     ? `<input type="hidden" name="mode" id="p_mode" value="${esc(modeValue)}">`
     : "";
@@ -125,23 +128,20 @@ function reportView(id) {
         <div class="segmented-control" id="modeSegments">${modeSegments}</div>
         ${modeSelect}
       </div>
-      ${paramFieldsHtml(r, values).replace(/<div class="field" data-mode="[^"]*"><label for="p_mode">[\s\S]*?<\/div>/g, '')}
+      ${paramFieldsHtml(r, values, { omit: ["mode"] })}
       <button class="btn primary" id="runBtn">
         <span id="runBtnText">Run report</span>
         <span id="runBtnSpinner" class="spinner hidden"></span>
       </button>
       <span class="spacer"></span>
       <div class="export-group" id="exportGroup">
-        <button type="button" class="btn" data-x="xlsx" disabled data-tooltip="Export to Excel">Excel</button>
-        <button type="button" class="btn" data-x="csv" disabled data-tooltip="Export to CSV">CSV</button>
-        <button type="button" class="btn" data-x="pdf" disabled data-tooltip="Export to PDF">PDF</button>
+        <button type="button" class="btn" data-x="xlsx" data-label="Excel" disabled data-tooltip="Export to Excel">Excel</button>
+        <button type="button" class="btn" data-x="csv" data-label="CSV" disabled data-tooltip="Export to CSV">CSV</button>
+        <button type="button" class="btn" data-x="pdf" data-label="PDF" disabled data-tooltip="Export to PDF">PDF</button>
       </div>
       <div class="field" style="margin-left:auto">
         <label>&nbsp;</label>
-        <div class="segmented-control" id="groupByToggle" style="width:auto" data-tooltip="Toggle grouped view by department">
-          <button type="button" class="btn" data-groupby="true" aria-pressed="${useGroupBy}" aria-current="${useGroupBy ? 'true' : 'false'}">Grouped</button>
-          <button type="button" class="btn" data-groupby="false" aria-pressed="${!useGroupBy}" aria-current="${!useGroupBy ? 'true' : 'false'}">Flat</button>
-        </div>
+        ${groupByToggleHtml(useGroupBy)}
       </div>
     </form>
     <div class="table-wrap hidden" id="out" role="region" aria-live="polite"></div>
@@ -171,6 +171,16 @@ function reportView(id) {
   const setMsg = (t, cls = "") => {
     msg.textContent = t;
     msg.className = "report-meta msg " + cls;
+  };
+
+  const OK_ICON = '<svg class="ok-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"' +
+    ' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M20 6 9 17l-5-5"/></svg>';
+
+  /** Success message with a checkmark; the text is escaped and the icon is ours. */
+  const setOk = (t) => {
+    msg.innerHTML = `${OK_ICON}<span>${esc(t)}</span>`;
+    msg.className = "report-meta msg ok";
   };
 
   // Handle segmented control for mode
@@ -242,6 +252,36 @@ function reportView(id) {
     return "";
   };
 
+  // Empty-state actions. "Try Absentees" carries this window over in the query string and then
+  // switches reports with a hash change, so the in-memory session token survives (a reload would
+  // sign the user out). "Change Date" returns to the field the current period is read from.
+  const openAbsentees = () => {
+    const url = new URL(location.href);
+    url.search = qs();
+    history.replaceState(null, "", url);
+    go("reports/absentees");
+  };
+
+  const focusPeriodField = () => {
+    const mode = valuesNow().mode || "single";
+    const field = form.querySelector(`.field[data-mode="${mode}"] input`);
+    if (!field) return;
+    field.scrollIntoView({ block: "center", behavior: "smooth" });
+    field.focus();
+    // Chromium opens the calendar on demand; it needs the click that got us here.
+    if (typeof field.showPicker === "function") { try { field.showPicker(); } catch { /* ignore */ } }
+  };
+
+  const showEmpty = () => {
+    // The Absentees report shares this window, but not on its own empty state.
+    const canRunAbsentees = id !== "absentees" && reportList.some((x) => x.id === "absentees");
+    const period = PERIOD_WORDS[valuesNow().mode || "single"] || PERIOD_WORDS.single;
+    out.classList.remove("hidden");
+    out.innerHTML = emptyStateHtml({ period, canRunAbsentees });
+    out.querySelector('[data-empty-action="absentees"]')?.addEventListener("click", openAbsentees);
+    out.querySelector('[data-empty-action="date"]')?.addEventListener("click", focusPeriodField);
+  };
+
   // Store latest rows and columns for re-rendering when toggling groupBy
   let latestRows = [];
   let latestColumns = [];
@@ -273,7 +313,6 @@ function reportView(id) {
     try {
       const { rows, subtitle, columns } = await (await api(`/reports/${id}/data?${qs()}`)).json();
       const cols = columns?.length ? columns : r.columns;
-      const period = PERIOD_WORDS[valuesNow().mode || "single"] || PERIOD_WORDS.single;
 
       // Store for re-rendering
       latestRows = rows;
@@ -298,12 +337,7 @@ function reportView(id) {
         out.innerHTML = tableHtml({ columns: cols, groupBy: currentGroupBy ? r.groupBy : null, rows, statusPill });
         exportGroup.querySelectorAll("[data-x]").forEach((b) => (b.disabled = false));
       } else {
-        out.classList.remove("hidden");
-        out.innerHTML = `<div class="empty" role="status">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 9h6v6H9z"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg>
-          <h3>No records for this ${period}</h3>
-          <p>Try another ${period}, or run the Absentees report for the same window.</p>
-        </div>`;
+        showEmpty();
       }
     } catch (err) {
       progressBar.classList.add("hidden");
@@ -333,17 +367,23 @@ function reportView(id) {
   };
 
   form.querySelectorAll("[data-x]").forEach((b) => (b.onclick = async () => {
-    const ext = b.dataset.x, label = b.textContent;
+    const ext = b.dataset.x, label = b.dataset.label || b.textContent.trim();
     b.disabled = true; b.textContent = "Preparing\u2026";
+    let saved = false;
     try {
       const blob = await (await api(`/reports/${id}/${ext}?${qs()}`)).blob();
       const a = Object.assign(document.createElement("a"), {
         href: URL.createObjectURL(blob), download: exportFileName(id, valuesNow(), ext),
       });
       a.click(); URL.revokeObjectURL(a.href);
-      setMsg(`Saved ${label} file to Downloads.`, "ok");
+      saved = true;
+      setOk(`Saved ${label} file to Downloads.`);
     } catch (err) { setMsg(err.message, "err"); }
-    b.disabled = false; b.textContent = label;
+    b.disabled = false;
+    if (!saved) { b.textContent = label; return; }
+    // The button itself confirms the save, then goes back to its own name.
+    b.textContent = "\u2713 Saved!";
+    setTimeout(() => { if (b.textContent === "\u2713 Saved!") b.textContent = label; }, 1600);
   }));
 
   // Add Ctrl+Enter shortcut
@@ -366,6 +406,19 @@ function route() {
 }
 
 $("#themeBtn").onclick = () => window.toggleTheme();
+
+// Density lives in the top bar next to the theme: it is a property of the desk, not of a report.
+const densityBtn = $("#densityBtn");
+if (densityBtn) {
+  const syncDensity = () => {
+    const compact = (document.documentElement.dataset.density || "comfortable") === "compact";
+    densityBtn.setAttribute("aria-pressed", String(compact));
+    densityBtn.dataset.tooltip = compact ? "Row density: compact (32px)" : "Row density: comfortable (40px)";
+  };
+  densityBtn.onclick = () => { window.toggleDensity(); syncDensity(); };
+  syncDensity();
+}
+
 $("#signOut").onclick = () => { token = null; reportList = []; go("login"); };
 addEventListener("hashchange", route);
 fetch("/api/meta").then((r) => r.json()).then(({ name }) => {
