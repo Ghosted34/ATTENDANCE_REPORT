@@ -68,6 +68,11 @@ export function createApp({ secret, getConfig, renderPdf }) {
     const report = reports.get(req.params.id);
     if (!report) throw Object.assign(new Error("Unknown report."), { status: 404 });
     const raw = Object.fromEntries(report.params.map((p) => [p.name, String(req.query[p.name] ?? "")]));
+    // Hand-written URLs may say employeeId. The form, saved views and exports keep idNumber;
+    // a non-empty idNumber wins so an existing link is unchanged.
+    if (!String(raw.idNumber ?? "").trim() && req.query.employeeId != null && String(req.query.employeeId).trim()) {
+      raw.employeeId = String(req.query.employeeId);
+    }
     // Reports own their validation so bad dates/ranges fail with a clear 400 before SQL runs.
     const params = report.normalize ? report.normalize(raw) : raw;
     const rows = await report.run(params, { tz: getConfig().tzOffsetHours });

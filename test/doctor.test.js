@@ -17,6 +17,7 @@ const DATETIME_TYPES = [
   { tbl: "EventHistory", name: "EventDescription", type: "nvarchar" },
   { tbl: "EventHistory", name: "EventUTCTime", type: "datetime" },
   { tbl: "p_people", name: "PeopleID", type: "int" },
+  { tbl: "p_people", name: "EmployeeID", type: "nvarchar" },
   { tbl: "p_people", name: "Firstname", type: "nvarchar" },
   { tbl: "p_people", name: "Lastname", type: "nvarchar" },
   { tbl: "p_people", name: "Department", type: "nvarchar" },
@@ -27,8 +28,17 @@ const TEXT_TYPES = DATETIME_TYPES.map((r) => (r.name === "EventUTCTime" ? { ...r
 const DATE_TYPES = DATETIME_TYPES.map((r) => (r.name === "EventUTCTime" ? { ...r, type: "date" } : r));
 
 const attendanceRow = {
-  LocalDate: "2026-10-01", PeopleID: 7, Firstname: "Ada", Lastname: "Obi", Department: "Ops",
+  LocalDate: "2026-10-01", PeopleID: 7, EmployeeID: "E-1007", Firstname: "Ada", Lastname: "Obi", Department: "Ops",
   CardNumber: 1234, FirstEntry: "08:01:02", LastEntry: "17:12:00", DurationMin: 551, AccessCount: 2,
+};
+// EmployeeID absent on a roster person: the column exists, the value does not (display falls back to "—").
+const attendanceRowNoBadge = {
+  ...attendanceRow, PeopleID: 11, EmployeeID: null, Firstname: "Chi", Lastname: "Eze",
+};
+// Swipe whose person is not in p_people: the LEFT JOIN yields no EmployeeID.
+const orphanSwipe = {
+  LocalDate: "2026-10-01", PeopleID: 42, EmployeeID: null, Firstname: null, Lastname: null, Department: null,
+  CardNumber: 555, FirstEntry: "09:15:00", LastEntry: "09:15:00", DurationMin: 0, AccessCount: 1,
 };
 
 // The dry run covers the seven whole local days before today (tz +1): 2026-09-28..2026-10-04.
@@ -41,8 +51,12 @@ const fakeDb = ({ types = DATETIME_TYPES, stats = {}, samples = [], bad = [], re
   const queryFn = async (sql, params) => {
     calls.push({ sql, params });
     if (/INFORMATION_SCHEMA\.COLUMNS/.test(sql)) {
+      const rows = [];
       const eventTime = types.find((row) => row.tbl === "EventHistory" && row.name === "EventUTCTime");
-      return eventTime ? [{ kind: eventTime.type }] : [];
+      if (eventTime) rows.push({ name: "EventUTCTime", kind: eventTime.type });
+      const employeeId = types.find((row) => row.tbl === "p_people" && row.name === "EmployeeID");
+      if (employeeId) rows.push({ name: "EmployeeID", kind: employeeId.type });
+      return rows;
     }
     if (/sys\.tables/.test(sql)) {
       if (typeProbeError) throw typeProbeError;
@@ -90,7 +104,11 @@ test("the doctor prints the configuration, the types, the range, the bad rows an
   assert.equal(CONFIG.connectionString.includes("s3cret!"), true);
 
   assert.match(text, /EventHistory\s+PeopleID int, CardNumber int, EventCategory int, EventDescription nvarchar, EventUTCTime varchar/);
-  assert.match(text, /p_people\s+PeopleID int, Firstname nvarchar, Lastname nvarchar, Department nvarchar, IsActive bit/);
+  assert.match(text, /p_people\s+PeopleID int, EmployeeID nvarchar, Firstname nvarchar, Lastname nvarchar, Department nvarchar, IsActive bit/);
+  assert.match(text, /Employee ID\s+shows and filters dbo\.p_people\.EmployeeID \(nvarchar\); PeopleID stays the join identity/);
+  const catalog = db.calls.find((call) => /sys\.tables/.test(call.sql));
+  assert.ok(Object.values(catalog.params).includes("EmployeeID"), "the doctor must look EmployeeID up, not only print it");
+  assert.ok(Object.values(catalog.params).includes("IsActive"));
   assert.match(text, /Statement\s+reads EventUTCTime \(a varchar column\) through TRY_CONVERT/);
   assert.match(text, /readable as date\/time: 5,120 row\(s\), 2026-09-28 07:12:00 to 2026-10-04 18:40:00/);
   assert.match(text, /Samples\s+2026-09-28 07:12:00, 2026-09-28 07:15:00/);
@@ -167,9 +185,31 @@ test("a date-only EventUTCTime uses the safe statement and explains its zero-dur
 
 /* ---------- the statements and the checks ---------- */
 
+test("a catalog without EmployeeID is a PeopleID fallback, not a failed people table", async () => {
+  const types = DATETIME_TYPES.filter((row) => row.name !== "EmployeeID");
+  const db = fakeDb({
+    types,
+    stats: { ReadableRows: 4, MinTime: new Date("2026-09-30T07:00:00Z"), MaxTime: new Date("2026-10-04T18:00:00Z"), OutOfRange: 0 },
+    reportRows: [attendanceRowNoBadge, orphanSwipe],
+  });
+  const { report, text } = await capture({ config: CONFIG, queryFn: db.queryFn, today: TODAY });
+  assert.equal(report.problems, 0, text);
+  assert.match(text, /p_people\s+PeopleID int, Firstname nvarchar, Lastname nvarchar, Department nvarchar, IsActive bit/);
+  assert.doesNotMatch(text, /has to provide these/);
+  assert.match(text, /Employee ID\s+dbo\.p_people\.EmployeeID was not found — the Employee ID column and filter fall back to PeopleID/);
+  assert.match(text, /returned 2 row\(s\)/);
+  const swipe = db.calls.find((call) => /EventCategory/.test(call.sql));
+  assert.match(swipe.sql, /pp\.PeopleID AS EmployeeID/);
+  assert.doesNotMatch(swipe.sql, /pp\.EmployeeID/);
+  const rosterSql = db.calls.find((call) => /IsActive/.test(call.sql));
+  assert.match(rosterSql.sql, /pp\.PeopleID AS EmployeeID/);
+  assert.match(rosterSql.sql, /CONVERT\(VARCHAR\(64\), pp\.PeopleID\)\)\) = @idNumber/);
+});
+
 test("every statement is parameterized and only ever looks at the whitelisted identifiers", () => {
   assert.equal(isAllowedIdentifier("EventHistory", "EventUTCTime"), true);
   assert.equal(isAllowedIdentifier("p_people", "Department"), true);
+  assert.equal(isAllowedIdentifier("p_people", "EmployeeID"), true);
   assert.equal(isAllowedIdentifier("p_people", "Salary"), false);
   assert.equal(isAllowedIdentifier("sys", "sql"), false);
   assert.equal(isAllowedIdentifier("EventHistory", "1; DROP TABLE x--"), false);

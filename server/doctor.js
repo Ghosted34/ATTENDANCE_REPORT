@@ -29,7 +29,12 @@ export const TIME_COLUMN = "EventUTCTime";
  * be added to a statement through them, because they are constants rather than input.
  */
 export const EVENT_COLUMNS = Object.freeze(["PeopleID", "CardNumber", "EventCategory", "EventDescription", TIME_COLUMN]);
-export const PEOPLE_COLUMNS = Object.freeze(["PeopleID", "Firstname", "Lastname", "Department", "IsActive"]);
+/**
+ * PeopleID is the join identity. EmployeeID is the badge / HR number the report shows and
+ * filters; a catalog without it is reported here, and the report falls back to PeopleID
+ * rather than failing the run.
+ */
+export const PEOPLE_COLUMNS = Object.freeze(["PeopleID", "EmployeeID", "Firstname", "Lastname", "Department", "IsActive"]);
 
 /** Column types as declared in the catalog, grouped the way the report needs them. */
 const DATETIME_TYPES = new Set(["datetime", "datetime2", "smalldatetime"]);
@@ -169,16 +174,30 @@ export function withError241Hint(error) {
 
 /* ---------- statements the report needs, derived from the column types ---------- */
 
-/** All the columns this report uses, in one round trip, with the table names kept apart. */
-const COLUMN_TYPES_SQL = `
+/**
+ * All the columns this report uses, in one round trip, with the table names kept apart.
+ * Placeholders are generated from the allowlists (never from input) so adding a column cannot
+ * silently drop it from the lookup — IsActive used to be omitted that way.
+ */
+function columnTypesQuery() {
+  const eventPlaceholders = EVENT_COLUMNS.map((_, i) => `@c${i}`).join(", ");
+  const peoplePlaceholders = PEOPLE_COLUMNS.map((_, i) => `@p${i}`).join(", ");
+  const params = { eventTable: EVENT_TABLE, peopleTable: PEOPLE_TABLE };
+  EVENT_COLUMNS.forEach((name, i) => { params[`c${i}`] = name; });
+  PEOPLE_COLUMNS.forEach((name, i) => { params[`p${i}`] = name; });
+  return {
+    params,
+    sql: `
 SELECT st.name AS tbl, sc.name AS name, t.name AS type
 FROM sys.columns AS sc
 JOIN sys.types AS t ON t.user_type_id = sc.user_type_id
 JOIN sys.tables AS st ON st.object_id = sc.object_id
 JOIN sys.schemas AS s ON s.schema_id = st.schema_id
-WHERE s.name = 'dbo' AND ((st.name = @eventTable AND sc.name IN (@c0, @c1, @c2, @c3, @c4))
-   OR (st.name = @peopleTable AND sc.name IN (@p0, @p1, @p2, @p3)))
-ORDER BY st.name, sc.column_id;`;
+WHERE s.name = 'dbo' AND ((st.name = @eventTable AND sc.name IN (${eventPlaceholders}))
+   OR (st.name = @peopleTable AND sc.name IN (${peoplePlaceholders})))
+ORDER BY st.name, sc.column_id;`,
+  };
+}
 
 /**
  * Range and samples for the time column, read the way the report reads it. DATEFROMPARTS builds
@@ -237,23 +256,37 @@ export async function buildDoctorReport({ config, queryFn = query, today = new D
   // 2. The column types the database really has.
   let types;
   try {
-    const rows = await queryFn(COLUMN_TYPES_SQL, {
-      eventTable: EVENT_TABLE,
-      peopleTable: PEOPLE_TABLE,
-      c0: EVENT_COLUMNS[0], c1: EVENT_COLUMNS[1], c2: EVENT_COLUMNS[2], c3: EVENT_COLUMNS[3], c4: EVENT_COLUMNS[4],
-      p0: PEOPLE_COLUMNS[0], p1: PEOPLE_COLUMNS[1], p2: PEOPLE_COLUMNS[2], p3: PEOPLE_COLUMNS[3],
-    });
+    const catalog = columnTypesQuery();
+    const rows = await queryFn(catalog.sql, catalog.params);
     types = new Map((rows ?? []).map((r) => [`${r.tbl}.${r.name}`, r.type]));
   } catch (error) {
     fail("Columns", `the column types could not be read: ${error.message}`);
     return report;
   }
 
+  // EmployeeID is optional: the report falls back to PeopleID, so a missing badge column is a
+  // note, not a failure of the whole people table.
+  const optional = new Set([`${PEOPLE_TABLE}.EmployeeID`]);
   for (const [table, columns] of [[EVENT_TABLE, EVENT_COLUMNS], [PEOPLE_TABLE, PEOPLE_COLUMNS]]) {
-    const parts = columns.map((column) => describeColumn(column, types.get(`${table}.${column}`)));
-    const missing = parts.filter((part) => part.endsWith("(column not found)"));
+    const parts = [];
+    const missing = [];
+    for (const column of columns) {
+      const key = `${table}.${column}`;
+      const type = types.get(key);
+      if (!type && optional.has(key)) continue;
+      const described = describeColumn(column, type);
+      parts.push(described);
+      if (!type) missing.push(described);
+    }
     if (missing.length) fail(table, `${missing.join(", ")} — dbo.${table} has to provide these.`);
     else line(table, parts.join(", "));
+  }
+
+  const employeeIdType = types.get(`${PEOPLE_TABLE}.EmployeeID`);
+  if (employeeIdType) {
+    line("Employee ID", `shows and filters dbo.${PEOPLE_TABLE}.EmployeeID (${employeeIdType}); PeopleID stays the join identity.`);
+  } else {
+    note("Employee ID", `dbo.${PEOPLE_TABLE}.EmployeeID was not found — the Employee ID column and filter fall back to PeopleID.`);
   }
 
   // 3. Which statement the report will run, chosen from that type.

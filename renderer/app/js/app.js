@@ -258,9 +258,14 @@ function reportView(id) {
   const fromUrl = hashQuery();
   const urlView = viewStateOf(fromUrl);
   const { values, extra: forwarded } = resolveReportParams(r, { query: fromUrl });
+  // A hand-written URL may say employeeId. The field, the saved view and the query parameter
+  // stay idNumber; copying it here is what lets the box show the value that will be filtered.
+  if (!String(values.idNumber ?? "").trim() && fromUrl.get("employeeId")) {
+    values.idNumber = fromUrl.get("employeeId").trim();
+  }
   // The view keys describe how the page is read, not what the report is asked for: they must not
   // travel to it as report parameters (which would also make them appear in every export URL).
-  const extra = forwarded.filter(({ name }) => !VIEW_KEYS.includes(name));
+  const extra = forwarded.filter(({ name }) => !VIEW_KEYS.includes(name) && name !== "employeeId");
 
   // Where the URL does not name a window, the last one this report was run with is offered, so
   // reopening "Absentees" does not silently start over at today.
