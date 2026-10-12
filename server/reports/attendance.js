@@ -1,6 +1,12 @@
 import { query } from "../db/pool.js";
 import { classifyColumn, EVENT_COLUMNS, isDateShapeError, PEOPLE_COLUMNS, withDateShapeHint } from "../doctor.js";
 
+// The doctor allowlist is what a run may read. EmployeeID has to stay on it or the probe and
+// the column lookup disagree about a column this report selects.
+if (!PEOPLE_COLUMNS.includes("EmployeeID")) {
+  throw new Error("dbo.p_people.EmployeeID must stay on the doctor allowlist.");
+}
+
 /**
  * Times are stored in UTC. @tz shifts them to local time, and the UTC window is derived from
  * the local first/last day so an index on the time column is still usable; rows are grouped
@@ -20,11 +26,16 @@ import { classifyColumn, EVENT_COLUMNS, isDateShapeError, PEOPLE_COLUMNS, withDa
  *     skips values it cannot parse instead of failing the whole report.
  *  3. The remaining filters never convert either: the event category is compared through
  *     TRY_CONVERT(int, …) and the Employee ID/card number as trimmed text.
- *
  *  4. Absence needs the people who are *not* in the swipe rows. A second, equally parameterized
  *     query reads the active roster (dbo.p_people.IsActive = 1). Absent rows are then produced
  *     in application code: one per eligible person per local day with no granted swipe, never
  *     for a day after today. That keeps the SQL to one day-grouping statement and one roster.
+ *     The match is PeopleID. The number a person reads off a badge or an HR record is
+ *     dbo.p_people.EmployeeID: both statements select it and filter on it, and that is what the
+ *     column shows. A catalog without EmployeeID falls back to PeopleID for that column and
+ *     filter (read once per run, the same INFORMATION_SCHEMA probe as the time column). A row
+ *     with no value is shown as —. Filtering p_people on the right of the LEFT JOIN makes that
+ *     join effectively inner only when a filter is supplied.
  *
  * Rows are ordered in application code, once, for the screen and the exports alike — by department,
  * then status (Present before Absent), then date, then name — which is also how they are grouped:
@@ -89,7 +100,11 @@ export function normalizeParams(values = {}) {
   const mode = String(values.mode ?? "").trim() || "single";
   if (!MODES.has(mode)) throw badRequest('Choose "Single date", "Date range" or "Month".');
 
-  const idNumber = String(values.idNumber ?? "").trim();
+  // idNumber is the saved parameter name (links, exports, the hidden-columns cookie's sibling
+  // field). employeeId is an alias for a hand-written URL; a non-empty idNumber wins.
+  // Defence in depth on top of the bound parameter. Not widened: no EmployeeID sample available
+  // here needed anything beyond letters, digits, dashes and underscores.
+  const idNumber = String(values.idNumber ?? "").trim() || String(values.employeeId ?? "").trim();
   if (idNumber && !/^[A-Za-z0-9_-]{1,64}$/.test(idNumber)) {
     throw badRequest("Employee ID can only contain letters, digits, dashes and underscores.");
   }
@@ -151,21 +166,21 @@ export const periodParams = Object.freeze([
 const spansDays = (params = {}) =>
   params.mode ? params.mode !== "single" : Boolean(params.start && params.end && params.start !== params.end);
 
-// Screen columns. Status makes absence explicit: "Present" when the person swiped that day,
-// "Absent" when an active employee did not. Department is a column of its own as well as the
-// section heading, so a row keeps saying where its person works however the table is read.
-// `minWidth` travels with the column, so a width stays on the column it was meant for however
-// many columns a report or a period puts in front of it.
+// Screen columns. Employee ID sits next to Card no.; Status closes the row, so Present/Absent
+// is read after the swipe detail. The column *key* stays `idNumber` — the sort in the address,
+// the hidden-columns cookie and the filter field are all keyed by it. Department is a column of
+// its own as well as the section heading. `minWidth` travels with the column, so a width stays
+// on the column it was meant for however many columns a report or a period puts in front of it.
 const COLUMNS = [
   { key: "name", label: "Name", minWidth: 150 },
   { key: "idNumber", label: "Employee ID", minWidth: 80 },
-  { key: "department", label: "Department", minWidth: 120 },
-  { key: "status", label: "Status", minWidth: 80 },
   { key: "cardNumber", label: "Card no.", minWidth: 80 },
+  { key: "department", label: "Department", minWidth: 120 },
   { key: "firstEntry", label: "First entry", minWidth: 80 },
   { key: "lastEntry", label: "Last entry", minWidth: 80 },
   { key: "duration", label: "Duration", minWidth: 80 },
   { key: "accessCount", label: "Swipes", align: "right", minWidth: 60 },
+  { key: "status", label: "Status", minWidth: 80 },
 ];
 
 const DATE_COLUMN = { key: "date", label: "Date", minWidth: 80 };
@@ -243,12 +258,31 @@ const ymdParts = (parameter) =>
 const datetimeMidnight = (parameter) => `DATETIMEFROMPARTS(${ymdParts(parameter)}, 0, 0, 0, 0)`;
 const datetime2Midnight = (parameter) => `DATETIME2FROMPARTS(${ymdParts(parameter)}, 0, 0, 0, 0, 3)`;
 
-const template = (time, timeUtc, windowType, midnightFor) => `
+// Only these two columns may be interpolated into a statement. Both are constants from this
+// module, never request input: EmployeeID is the badge number, PeopleID the fallback when that
+// column is not in the catalog.
+const IDENTITY_COLUMN = Object.freeze({
+  EmployeeID: "pp.EmployeeID",
+  PeopleID: "pp.PeopleID",
+});
+
+const identityExpr = (identity) => {
+  const expr = IDENTITY_COLUMN[identity];
+  if (!expr) throw new Error("Employee ID is read from EmployeeID or, if that column is absent, PeopleID.");
+  return expr;
+};
+
+/** The badge column under the name the row mapper reads. The fallback aliases PeopleID so the mapper stays one path. */
+const badgeSelect = (identity) => (identity === "PeopleID" ? "pp.PeopleID AS EmployeeID" : "pp.EmployeeID");
+
+const template = (time, timeUtc, windowType, midnightFor, identity = "EmployeeID") => {
+  const badge = identityExpr(identity);
+  return `
 DECLARE @from ${windowType} = DATEADD(HOUR, -@tz, ${midnightFor("@startYmd")});
 DECLARE @to   ${windowType} = DATEADD(DAY, 1, DATEADD(HOUR, -@tz, ${midnightFor("@endYmd")}));
 
 SELECT
-  eh.PeopleID, pp.Firstname, pp.Lastname, pp.Department,
+  eh.PeopleID, ${badgeSelect(identity)}, pp.Firstname, pp.Lastname, pp.Department,
   ${localDayExpr(time)} AS LocalDate,
   MIN(eh.CardNumber) AS CardNumber,
   ${clockExpr(`MIN(${timeUtc})`)} AS FirstEntry,
@@ -261,23 +295,28 @@ WHERE TRY_CONVERT(int, eh.EventCategory) = 10001
   AND eh.EventDescription = N'Access Granted'
   AND eh.CardNumber IS NOT NULL AND LTRIM(RTRIM(CONVERT(VARCHAR(64), eh.CardNumber))) <> '0'
   AND ${timeUtc} >= @from AND ${timeUtc} < @to
-  -- Optional ID-number filter; empty means everyone. Compared as text so any PeopleID type works.
-  AND (@idNumber = '' OR LTRIM(RTRIM(CONVERT(VARCHAR(64), eh.PeopleID))) = @idNumber)
-GROUP BY eh.PeopleID, pp.Firstname, pp.Lastname, pp.Department, ${localDayExpr(time)};`;
+  -- Filtering the right-hand table of the LEFT JOIN makes that join effectively inner when a
+  -- filter is supplied, which is the point — the reader asked for one person — while an
+  -- unfiltered run still shows swipes whose person is missing from p_people.
+  AND (@idNumber = '' OR LTRIM(RTRIM(CONVERT(VARCHAR(64), ${badge}))) = @idNumber)
+GROUP BY eh.PeopleID, ${badge}, pp.Firstname, pp.Lastname, pp.Department, ${localDayExpr(time)};`;
+};
 
 /** Time-bearing datetime column: preserve its raw value for index-friendly comparisons. */
-export const statementFor = (kind) => (kind === "datetime"
+export const statementFor = (kind, identity = "EmployeeID") => (kind === "datetime"
   ? template(
     "DATEADD(HOUR, @tz, eh.EventUTCTime)",
     "eh.EventUTCTime",
     "DATETIME",
     datetimeMidnight,
+    identity,
   )
   : template(
     "DATEADD(HOUR, @tz, TRY_CONVERT(datetime2(3), eh.EventUTCTime))",
     "TRY_CONVERT(datetime2(3), eh.EventUTCTime)",
     "DATETIME2(3)",
     datetime2Midnight,
+    identity,
   ));
 
 /** The statement used when the column type could not be read: the text-safe one, never fatal. */
@@ -291,14 +330,21 @@ WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'EventHistory' AND COLUMN_NAME = 'Ev
 /**
  * Who can be marked absent: active people only. dbo.p_people.IsActive is 1 for active staff and 0
  * for inactive or not-yet-employed people. Anything that is not 1 (including NULL or unreadable
- * text) is not eligible, so an unknown status can never produce an absence. Like the attendance
- * statement, the ID filter is a bound parameter compared as trimmed text.
+ * text) is not eligible, so an unknown status can never produce an absence. The Employee ID
+ * filter matches pp.EmployeeID (or pp.PeopleID when that column is absent) as trimmed text, the
+ * same bound parameter as the swipe statement. PeopleID is still selected: it is the match key.
  */
-export const ROSTER_SQL = `
-SELECT pp.PeopleID, pp.Firstname, pp.Lastname, pp.Department
+export function rosterSqlFor(identity = "EmployeeID") {
+  const badge = identityExpr(identity);
+  return `
+SELECT pp.PeopleID, ${badgeSelect(identity)}, pp.Firstname, pp.Lastname, pp.Department
 FROM dbo.p_people AS pp
 WHERE TRY_CONVERT(int, pp.IsActive) = 1
-  AND (@idNumber = '' OR LTRIM(RTRIM(CONVERT(VARCHAR(64), pp.PeopleID))) = @idNumber);`;
+  AND (@idNumber = '' OR LTRIM(RTRIM(CONVERT(VARCHAR(64), ${badge}))) = @idNumber);`;
+}
+
+/** The statement used when dbo.p_people.EmployeeID is in the catalog. */
+export const ROSTER_SQL = rosterSqlFor("EmployeeID");
 
 /**
  * Reads EventUTCTime's declared type once per run. Anything unreadable — no row, an error, an
@@ -313,6 +359,52 @@ export async function readEventTimeType(queryFn = query) {
   } catch {
     return "text";
   }
+}
+
+/**
+ * One catalog read per run: the time column's type and whether EmployeeID exists. Combining
+ * them keeps the probe to a single round trip, the same "asked once" rule as the time column.
+ * An answer that names columns and omits EmployeeID — or a lookup that fails — falls back to
+ * PeopleID, because selecting a column that is not there would fail the report. An answer with
+ * no column name (the time-type probe's old shape) does not prove the badge column is missing.
+ */
+const CATALOG_SQL = `
+SELECT COLUMN_NAME AS name, DATA_TYPE AS kind
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA = 'dbo'
+  AND (
+    (TABLE_NAME = 'EventHistory' AND COLUMN_NAME = 'EventUTCTime')
+    OR (TABLE_NAME = 'p_people' AND COLUMN_NAME = 'EmployeeID')
+  );`;
+
+const timeKindOf = (rows) => {
+  const list = Array.isArray(rows) ? rows : [];
+  const named = list.find((row) => row?.name === "EventUTCTime");
+  const source = named ?? list.find((row) => row?.kind && !row?.name);
+  if (!source) return "missing";
+  const kind = classifyColumn(source.kind);
+  return kind === "unknown" ? "text" : kind;
+};
+
+const identityOf = (rows, failed) => {
+  if (failed) return "PeopleID";
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.some((row) => row?.name)) return "EmployeeID";
+  return list.some((row) => row.name === "EmployeeID") ? "EmployeeID" : "PeopleID";
+};
+
+export async function readReportShape(queryFn = query) {
+  try {
+    const rows = await queryFn(CATALOG_SQL, {});
+    return { timeKind: timeKindOf(rows), identity: identityOf(rows, false) };
+  } catch {
+    return { timeKind: "text", identity: "PeopleID" };
+  }
+}
+
+/** "EmployeeID" when the catalog has the badge column, otherwise "PeopleID". */
+export async function readEmployeeIdColumn(queryFn = query) {
+  return (await readReportShape(queryFn)).identity;
 }
 
 /* ---------- Absence ---------- */
@@ -347,8 +439,16 @@ export function localToday(now = new Date(), tzOffsetHours = 0) {
   return new Date(now.getTime() + offset * 3600000).toISOString().slice(0, 10);
 }
 
-/** The matching key for the same person in the swipe rows and the roster: trimmed text. */
+/** The matching key for the same person in the swipe rows and the roster: trimmed text of PeopleID. */
 const personKey = (id) => (id === null || id === undefined ? null : String(id).trim());
+
+/** A blank badge number keeps the em dash the rest of the row already uses for "no value". */
+const displayId = (value) => {
+  if (value === null || value === undefined) return "—";
+  const text = String(value).trim();
+  if (!text) return "—";
+  return typeof value === "string" ? text : value;
+};
 
 const nameOf = (row) => [row.Lastname, row.Firstname].filter(Boolean).join(" ") || "Unknown";
 
@@ -419,20 +519,25 @@ const sortRows = (rows) => rows.sort((a, b) =>
 export async function runPeriod(params, { tz, queryFn = query, now = new Date() } = {}) {
   const normalized = normalizeParams(params);
   const { start, end, idNumber } = normalized;
-  const kind = await readEventTimeType(queryFn);
+  const { timeKind, identity } = await readReportShape(queryFn);
   const values = { startYmd: toYmd(start), endYmd: toYmd(end), idNumber: idNumber ?? "", tz };
 
-  const swipes = await guard(() => queryFn(statementFor(kind), values));
-  const people = await guard(() => queryFn(ROSTER_SQL, { idNumber: idNumber ?? "" }));
+  const swipes = await guard(() => queryFn(statementFor(timeKind, identity), values));
+  const people = await guard(() => queryFn(rosterSqlFor(identity), { idNumber: idNumber ?? "" }));
 
+  // Absence matches on PeopleID, never on the displayed badge: a blank badge ("—") must not
+  // collapse two people into one, and a badge number is not the key the roster shares.
+  const presentKeys = new Set();
   const present = swipes.map((r) => {
     const single = r.DurationMin === 0; // one swipe: no check-out to show
     const date = r.LocalDate ?? start;
+    const key = personKey(r.PeopleID);
+    if (key) presentKeys.add(`${key}|${date}`);
     return {
       date,
       day: weekdayOf(date),
       name: nameOf(r),
-      idNumber: r.PeopleID ?? "—",
+      idNumber: displayId(r.EmployeeID),
       department: r.Department || "Unassigned",
       cardNumber: r.CardNumber,
       firstEntry: r.FirstEntry,
@@ -447,10 +552,14 @@ export async function runPeriod(params, { tz, queryFn = query, now = new Date() 
   for (const person of people) {
     const key = personKey(person.PeopleID);
     if (key && !byKey.has(key)) {
-      byKey.set(key, { key, name: nameOf(person), idNumber: person.PeopleID, department: person.Department || "Unassigned" });
+      byKey.set(key, {
+        key,
+        name: nameOf(person),
+        idNumber: displayId(person.EmployeeID),
+        department: person.Department || "Unassigned",
+      });
     }
   }
-  const presentKeys = new Set(present.map((r) => `${personKey(r.idNumber)}|${r.date}`));
   const absent = absentRows({
     start,
     end,

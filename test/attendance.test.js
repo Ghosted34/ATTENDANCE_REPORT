@@ -7,8 +7,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import attendance, {
   ABSENCE_SKIP_WEEKENDS, absentRows, columnsFor, daysInPeriod, exportColumnsFor, GROUP_BY, isIsoDate, isWeekend,
-  localToday, MAX_PERIOD_DAYS, monthBounds, normalizeParams, periodParams, rangeDays, readEventTimeType, ROSTER_SQL,
-  runPeriod, statementFor, subtitle, TEXT_SAFE_STATEMENT, weekdayOf,
+  localToday, MAX_PERIOD_DAYS, monthBounds, normalizeParams, periodParams, rangeDays, readEmployeeIdColumn,
+  readEventTimeType, readReportShape, ROSTER_SQL, rosterSqlFor, runPeriod, statementFor, subtitle,
+  TEXT_SAFE_STATEMENT, weekdayOf,
 } from "../server/reports/attendance.js";
 import absentees, { columnsFor as absenteesColumnsFor } from "../server/reports/absentees.js";
 import { classifyColumn, isDateShapeError, isError241 } from "../server/doctor.js";
@@ -16,22 +17,27 @@ import { columnsOf, group, toCsv, toHtml, toXlsx } from "../server/reports/expor
 import { sectionsOf } from "../renderer/app/js/template.js";
 import { toPdf } from "../server/reports/pdf.js";
 
-// Two people, two local days: the range query returns one row per person per day.
+// Two people, two local days, plus a swipe whose person is not in p_people. EmployeeID is the
+// badge number the column shows; PeopleID stays the match key and is deliberately different.
 const dbRows = [
-  { LocalDate: "2026-10-05", PeopleID: 7, Firstname: "Ada", Lastname: "Obi", Department: "Ops",
+  { LocalDate: "2026-10-05", PeopleID: 7, EmployeeID: "E-1007", Firstname: "Ada", Lastname: "Obi", Department: "Ops",
     CardNumber: 1234, FirstEntry: "08:01:02", LastEntry: "17:12:00", DurationMin: 551, AccessCount: 2 },
-  { LocalDate: "2026-10-06", PeopleID: 7, Firstname: "Ada", Lastname: "Obi", Department: "Ops",
+  { LocalDate: "2026-10-06", PeopleID: 7, EmployeeID: "E-1007", Firstname: "Ada", Lastname: "Obi", Department: "Ops",
     CardNumber: 1234, FirstEntry: "07:58:41", LastEntry: "07:58:41", DurationMin: 0, AccessCount: 1 },
-  { LocalDate: "2026-10-06", PeopleID: 9, Firstname: "Ben", Lastname: "Nwosu", Department: "Security",
+  { LocalDate: "2026-10-06", PeopleID: 9, EmployeeID: "E-1009", Firstname: "Ben", Lastname: "Nwosu", Department: "Security",
     CardNumber: 9876, FirstEntry: "06:30:00", LastEntry: "18:00:00", DurationMin: 690, AccessCount: 4 },
+  // Not in p_people: the LEFT JOIN yields no EmployeeID. An unfiltered run still shows the swipe.
+  { LocalDate: "2026-10-05", PeopleID: 42, EmployeeID: null, Firstname: null, Lastname: null, Department: null,
+    CardNumber: 555, FirstEntry: "09:15:00", LastEntry: "09:15:00", DurationMin: 0, AccessCount: 1 },
 ];
 
 // Active employees (IsActive = 1 in the roster query). Ada and Ben swiped in the range above; Chi
-// never did, so Chi is the person the report must list as Absent on every day.
+// never did, so Chi is the person the report must list as Absent on every day. Chi's EmployeeID
+// is absent: the column exists, the value does not, the cell stays "—".
 const roster = [
-  { PeopleID: 7, Firstname: "Ada", Lastname: "Obi", Department: "Ops" },
-  { PeopleID: 9, Firstname: "Ben", Lastname: "Nwosu", Department: "Security" },
-  { PeopleID: 11, Firstname: "Chi", Lastname: "Eze", Department: "Ops" },
+  { PeopleID: 7, EmployeeID: "E-1007", Firstname: "Ada", Lastname: "Obi", Department: "Ops" },
+  { PeopleID: 9, EmployeeID: "E-1009", Firstname: "Ben", Lastname: "Nwosu", Department: "Security" },
+  { PeopleID: 11, EmployeeID: null, Firstname: "Chi", Lastname: "Eze", Department: "Ops" },
 ];
 
 // A fixed "now" (12 Oct 2026 09:00 UTC, i.e. 10:00 in Lagos) so the future-day cut-off is stable.
@@ -204,6 +210,13 @@ test("invalid dates, unknown modes, reversed ranges and bad ID numbers are rejec
   bad({ mode: "daily", date: "2026-10-05" }, /Single date/);
   bad({ date: "2026-10-05", idNumber: "7 OR 1=1" }, /Employee ID can only contain/);
   bad({ date: "2026-10-05", idNumber: "a".repeat(65) }, /Employee ID can only contain/);
+  bad({ date: "2026-10-05", idNumber: "E.1007" }, /Employee ID can only contain/); // charset not widened for a dot
+  bad({ date: "2026-10-05", employeeId: "7 OR 1=1" }, /Employee ID can only contain/);
+  assert.equal(normalizeParams({ date: "2026-10-05", idNumber: "E-1007" }).idNumber, "E-1007");
+  assert.equal(normalizeParams({ date: "2026-10-05", idNumber: "E_1007" }).idNumber, "E_1007");
+  // Alias for a hand-written URL. A non-empty idNumber wins so an existing link is unchanged.
+  assert.equal(normalizeParams({ date: "2026-10-05", employeeId: " E-1007 " }).idNumber, "E-1007");
+  assert.equal(normalizeParams({ date: "2026-10-05", idNumber: "E-1", employeeId: "E-2" }).idNumber, "E-1");
 });
 
 test("rangeDays counts both ends", () => {
@@ -214,26 +227,31 @@ test("rangeDays counts both ends", () => {
 
 /* ---------- Columns and subtitle ---------- */
 
-test("the screen table leads with Day (and Date for a longer period), and Department is a column of its own", () => {
+test("the screen table leads with Day (and Date for a longer period), Employee ID sits beside Card no., and Status closes the row", () => {
   assert.deepEqual(columnsFor({ mode: "single", date: "2026-10-05" }).map((c) => c.key), [
-    "day", "name", "idNumber", "department", "status", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
+    "day", "name", "idNumber", "cardNumber", "department", "firstEntry", "lastEntry", "duration", "accessCount", "status",
   ]);
   assert.deepEqual(columnsFor({ mode: "range", start: "2026-10-05", end: "2026-10-07" }).map((c) => c.key), [
-    "date", "day", "name", "idNumber", "department", "status", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
+    "date", "day", "name", "idNumber", "cardNumber", "department", "firstEntry", "lastEntry", "duration", "accessCount", "status",
   ]);
   assert.deepEqual(columnsFor({ mode: "month", month: "2026-10" }).map((c) => c.key), [
-    "date", "day", "name", "idNumber", "department", "status", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
+    "date", "day", "name", "idNumber", "cardNumber", "department", "firstEntry", "lastEntry", "duration", "accessCount", "status",
   ]);
   // Date and Day are adjacent in both orders, and Day is the first column when there is no Date.
   assert.equal(columnsFor({ mode: "single", date: "2026-10-05" })[0].label, "Day");
   assert.equal(columnsFor({ mode: "month", month: "2026-10" })[1].label, "Day");
+  const range = columnsFor({ mode: "range", start: "2026-10-05", end: "2026-10-07" });
+  assert.equal(range.at(-1).key, "status");
+  assert.equal(range[range.findIndex((c) => c.key === "idNumber") + 1].key, "cardNumber");
   // No period at all (the legacy call): Day still leads, and no Date column is invented.
   assert.deepEqual(columnsFor({}).map((c) => c.label), [
-    "Day", "Name", "Employee ID", "Department", "Status", "Card no.", "First entry", "Last entry", "Duration", "Swipes",
+    "Day", "Name", "Employee ID", "Card no.", "Department", "First entry", "Last entry", "Duration", "Swipes", "Status",
   ]);
   assert.equal(attendance.columns.some((c) => c.key === "peopleId"), false);
   assert.equal(attendance.columns.length, 9); // legacy shape: the single-date columns, minus Day/Date
   assert.equal(attendance.columns.some((c) => ["day", "date"].includes(c.key)), false);
+  // The key the sort, the cookie and the filter share did not move.
+  assert.equal(attendance.columns.find((c) => c.label === "Employee ID").key, "idNumber");
 });
 
 test("exports carry exactly the screen columns, so nothing has to be inserted into a sheet", () => {
@@ -249,10 +267,10 @@ test("exports carry exactly the screen columns, so nothing has to be inserted in
     assert.equal(screen.indexOf("day"), screen.indexOf("date") + 1, params.mode);
   }
   assert.deepEqual(exportColumnsFor({ mode: "single", date: "2026-10-05" }).map((c) => c.key), [
-    "day", "name", "idNumber", "department", "status", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
+    "day", "name", "idNumber", "cardNumber", "department", "firstEntry", "lastEntry", "duration", "accessCount", "status",
   ]);
   assert.deepEqual(exportColumnsFor({ mode: "range", start: "2026-10-05", end: "2026-10-07" }).map((c) => c.key), [
-    "date", "day", "name", "idNumber", "department", "status", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
+    "date", "day", "name", "idNumber", "cardNumber", "department", "firstEntry", "lastEntry", "duration", "accessCount", "status",
   ]);
 });
 
@@ -273,10 +291,11 @@ test("subtitle names the day (with its weekday), the range or the month, and its
 test("the Day column names each row's weekday in every period, and the absentee report has it too", async () => {
   const { queryFn } = fakeQuery();
   const single = await attendance.run({ date: "2026-10-05" }, { tz: 1, queryFn, now: NOW });
-  assert.deepEqual(single.map((r) => [r.date, r.day, r.status]), [
-    ["2026-10-05", "Monday", "Present"], // Ops: Ada swiped, Chi did not
-    ["2026-10-05", "Monday", "Absent"],
-    ["2026-10-05", "Monday", "Absent"], // Security: Ben did not
+  assert.deepEqual(single.map((r) => [r.date, r.day, r.name, r.status, r.idNumber]), [
+    ["2026-10-05", "Monday", "Obi Ada", "Present", "E-1007"],
+    ["2026-10-05", "Monday", "Eze Chi", "Absent", "—"],
+    ["2026-10-05", "Monday", "Nwosu Ben", "Absent", "E-1009"],
+    ["2026-10-05", "Monday", "Unknown", "Present", "—"], // swipe whose person is not in p_people
   ]);
 
   const range = await attendance.run({ mode: "range", start: "2026-10-05", end: "2026-10-07" }, { tz: 1, queryFn, now: NOW });
@@ -298,7 +317,8 @@ test("rows run by department, then Present before Absent, and by date inside eac
   const { queryFn } = fakeQuery();
   const rows = await attendance.run({ mode: "range", start: "2026-10-05", end: "2026-10-07" }, { tz: 1, queryFn, now: NOW });
 
-  // Ops first: its three swipes, then its three absences, each in date order. Security follows.
+  // Ops first: its swipes, then its absences, each in date order. Security follows. A swipe whose
+  // person is missing from p_people lands in Unassigned and has no absence rows.
   assert.deepEqual(rows.map((r) => [r.department, r.status, r.date, r.name]), [
     ["Ops", "Present", "2026-10-05", "Obi Ada"],
     ["Ops", "Present", "2026-10-06", "Obi Ada"],
@@ -309,12 +329,16 @@ test("rows run by department, then Present before Absent, and by date inside eac
     ["Security", "Present", "2026-10-06", "Nwosu Ben"],
     ["Security", "Absent", "2026-10-05", "Nwosu Ben"],
     ["Security", "Absent", "2026-10-07", "Nwosu Ben"],
+    ["Unassigned", "Present", "2026-10-05", "Unknown"],
   ]);
 
   // The same rule read as properties: the department's Present block and Absent block are each
   // date-ordered, no Present row ever lands after an Absent one, and nobody is listed twice a day.
+  // A department with only a swipe (person missing from p_people) has no Absent block.
   for (const [department, section] of Map.groupBy(rows, (r) => r.department)) {
-    assert.deepEqual([...Map.groupBy(section, (r) => r.status).keys()], ["Present", "Absent"], department);
+    const statuses = [...Map.groupBy(section, (r) => r.status).keys()];
+    assert.equal(statuses[0], "Present", department);
+    if (statuses.includes("Absent")) assert.deepEqual(statuses, ["Present", "Absent"], department);
     for (const [status, block] of Map.groupBy(section, (r) => r.status)) {
       const dates = block.map((r) => r.date);
       assert.deepEqual(dates, [...dates].sort(), `${department} — ${status} runs by date`);
@@ -346,11 +370,17 @@ test("each department is cut into a Present block and an Absent block, with its 
   // What the page and the exports group by: department, then status.
   assert.deepEqual([...GROUP_BY], ["department", "status"]);
   const headings = group(attendance, rows).map((section) => `${section.name} (${section.rows.length})`);
-  assert.deepEqual(headings, ["Ops — Present (2)", "Ops — Absent (4)", "Security — Present (1)", "Security — Absent (2)"]);
+  assert.deepEqual(headings, [
+    "Ops — Present (2)", "Ops — Absent (4)", "Security — Present (1)", "Security — Absent (2)",
+    "Unassigned — Present (1)",
+  ]);
+  // Status is the last column; the heading is still "Department — Present/Absent", not a column label.
+  assert.equal(columnsFor(params).at(-1).key, "status");
+  assert.ok(headings.every((heading) => / — (Present|Absent) \(/.test(heading)), headings.join(", "));
 
   // The screen splits identically, in the same order, because it reads the same grouping.
   assert.deepEqual([...sectionsOf(rows, attendance.groupBy).keys()], [
-    "Ops — Present", "Ops — Absent", "Security — Present", "Security — Absent",
+    "Ops — Present", "Ops — Absent", "Security — Present", "Security — Absent", "Unassigned — Present",
   ]);
 
   // So does the printable template Chromium renders (the Electron PDF source).
@@ -436,6 +466,14 @@ test("both SQL variants build time-capable windows with documented function arit
     assert.ok(builderCalls.every((args) => args.length === arity), `${builder} must take ${arity} arguments`);
     assert.equal(functionCalls(sql, "DATEFROMPARTS").length, 0, "a date-only value cannot be shifted by HOUR");
 
+    // Both variants select and filter the badge column, and still group on PeopleID.
+    assert.match(sql, /eh\.PeopleID, pp\.EmployeeID, pp\.Firstname/);
+    assert.match(sql, /GROUP BY eh\.PeopleID, pp\.EmployeeID, pp\.Firstname/);
+    assert.match(sql, /LTRIM\(RTRIM\(CONVERT\(VARCHAR\(64\), pp\.EmployeeID\)\)\) = @idNumber/);
+    assert.match(sql, /effectively inner/);
+    assert.doesNotMatch(sql, /eh\.PeopleID\)\) = @idNumber/);
+    assert.throws(() => statementFor(kind, "EmployeeID; DROP TABLE x"), /EmployeeID or, if that column is absent/);
+
     // Every HOUR/MINUTE/SECOND DATEADD must receive a type that carries time: the matching
     // window builder, a TRY_CONVERT(datetime2(3)), or the plain date/time column variant.
     const timeAdds = functionCalls(sql, "DATEADD").filter(([datepart]) => /^(HOUR|MINUTE|SECOND)$/i.test(datepart));
@@ -456,7 +494,11 @@ test("the filters never convert, and the optional ID number travels as its own S
   await attendance.run({ date: "2026-10-05", idNumber: " 7 " }, { tz: 1, queryFn });
   const { sql } = calls[1];
   assert.equal(calls[1].params.idNumber, "7"); // trimmed, still a bound parameter
-  assert.match(sql, /LTRIM\(RTRIM\(CONVERT\(VARCHAR\(64\), eh\.PeopleID\)\)\) = @idNumber/);
+  assert.match(sql, /LTRIM\(RTRIM\(CONVERT\(VARCHAR\(64\), pp\.EmployeeID\)\)\) = @idNumber/);
+  assert.match(sql, /SELECT\s+eh\.PeopleID, pp\.EmployeeID,/);
+  assert.match(calls[2].sql, /SELECT pp\.PeopleID, pp\.EmployeeID,/);
+  assert.match(calls[2].sql, /LTRIM\(RTRIM\(CONVERT\(VARCHAR\(64\), pp\.EmployeeID\)\)\) = @idNumber/);
+  assert.equal(calls[2].params.idNumber, "7");
   assert.match(sql, /TRY_CONVERT\(int, eh\.EventCategory\) = 10001/);
   assert.match(sql, /LTRIM\(RTRIM\(CONVERT\(VARCHAR\(64\), eh\.CardNumber\)\)\) <> '0'/);
   assert.doesNotMatch(sql, /eh\.EventCategory = 10001/); // the bare compare would fail on a text column
@@ -511,7 +553,10 @@ test("the statement matches the type of the time column: plain for time-bearing 
 test("an unknown, missing or unreadable column type falls back to the text-safe statement", async () => {
   for (const [label, type] of [["unknown type", "uniqueidentifier"], ["no such column", null], ["a failing lookup", "boom"]]) {
     const calls = await runWithColumnType(type);
-    assert.equal(calls[1].sql, TEXT_SAFE_STATEMENT, label);
+    // A failed catalog read cannot prove EmployeeID exists, so that path falls back to PeopleID.
+    // An empty or unnamed answer does not: the time-type mocks still select the badge column.
+    const expected = type === "boom" ? statementFor("text", "PeopleID") : TEXT_SAFE_STATEMENT;
+    assert.equal(calls[1].sql, expected, label);
     assert.deepEqual(calls[1].params, { startYmd: 20261005, endYmd: 20261005, idNumber: "", tz: 1 }, label);
   }
 });
@@ -553,17 +598,18 @@ test("swipe rows keep one entry per person per local day and carry the date and 
   const out = await attendance.run({ mode: "range", start: "2026-10-05", end: "2026-10-07" }, { tz: 1, queryFn, now: NOW });
   const present = out.filter((r) => r.status === "Present");
 
-  assert.deepEqual(present.map((r) => [r.date, r.name]), [
-    ["2026-10-05", "Obi Ada"],
-    ["2026-10-06", "Obi Ada"],
-    ["2026-10-06", "Nwosu Ben"],
+  assert.deepEqual(present.map((r) => [r.date, r.name, r.idNumber]), [
+    ["2026-10-05", "Obi Ada", "E-1007"],
+    ["2026-10-06", "Obi Ada", "E-1007"],
+    ["2026-10-06", "Nwosu Ben", "E-1009"],
+    ["2026-10-05", "Unknown", "—"], // swipe, person not in p_people: no badge, still shown
   ]);
   assert.equal(present[0].duration, "9h 11m");
   assert.equal(present[1].duration, "—"); // single swipe on the second day
   assert.equal(present[1].lastEntry, "—");
   assert.equal(present[2].accessCount, 4);
   assert.equal(present[2].department, "Security");
-  assert.equal(present[2].idNumber, 9);
+  assert.notEqual(present[0].idNumber, 7); // the column is EmployeeID, not PeopleID
 });
 
 test("eligible employees with no swipe are listed as Absent on every day of the period", async () => {
@@ -571,11 +617,12 @@ test("eligible employees with no swipe are listed as Absent on every day of the 
   const out = await attendance.run({ mode: "range", start: "2026-10-05", end: "2026-10-07" }, { tz: 1, queryFn, now: NOW });
 
   // Chi never swiped: one Absent row per day, with the absence shown in the swipe columns too.
-  const chi = out.filter((r) => r.idNumber === 11);
+  // Her EmployeeID is null, so the cell is "—", not PeopleID 11.
+  const chi = out.filter((r) => r.name === "Eze Chi");
   assert.deepEqual(chi.map((r) => r.date), ["2026-10-05", "2026-10-06", "2026-10-07"]);
   for (const row of chi) {
     assert.equal(row.status, "Absent");
-    assert.equal(row.name, "Eze Chi");
+    assert.equal(row.idNumber, "—");
     assert.equal(row.department, "Ops");
     assert.equal(row.accessCount, 0);
     assert.equal(row.cardNumber, "—");
@@ -583,14 +630,19 @@ test("eligible employees with no swipe are listed as Absent on every day of the 
   }
   // Ada swiped on the 5th and 6th, so only the 7th is absent; Ben swiped on the 6th only. A
   // person's own rows come back in the report's order — their Present days, then their Absent ones.
-  assert.deepEqual(out.filter((r) => r.idNumber === 7).map((r) => [r.date, r.status]), [
+  // Matching used PeopleID, so a badge of E-1007 is still the same person as the roster row.
+  assert.deepEqual(out.filter((r) => r.idNumber === "E-1007").map((r) => [r.date, r.status]), [
     ["2026-10-05", "Present"], ["2026-10-06", "Present"], ["2026-10-07", "Absent"],
   ]);
-  assert.deepEqual(out.filter((r) => r.idNumber === 9).map((r) => [r.date, r.status]), [
+  assert.deepEqual(out.filter((r) => r.idNumber === "E-1009").map((r) => [r.date, r.status]), [
     ["2026-10-06", "Present"], ["2026-10-05", "Absent"], ["2026-10-07", "Absent"],
   ]);
+  // Chi and the unmatched swipe both display "—" on the 5th, and they stay two rows: the match
+  // key is PeopleID, not the displayed badge.
+  const sameDay = out.filter((r) => r.date === "2026-10-05" && r.idNumber === "—");
+  assert.deepEqual(sameDay.map((r) => [r.name, r.status]).sort(), [["Eze Chi", "Absent"], ["Unknown", "Present"]]);
   // One row per person per day: never both Present and Absent for the same day.
-  const keys = out.map((r) => `${r.idNumber}|${r.date}`);
+  const keys = out.map((r) => `${r.name}|${r.date}`);
   assert.equal(new Set(keys).size, keys.length);
 });
 
@@ -600,19 +652,58 @@ test("the roster is the active employees only, by the IsActive flag, and is boun
   assert.match(ROSTER_SQL, /TRY_CONVERT\(int, pp\.IsActive\) = 1/);
   assert.match(ROSTER_SQL, /FROM dbo\.p_people AS pp/);
   assert.doesNotMatch(ROSTER_SQL, /IsActive\s*(!=|<>|IS NULL)/);
-  assert.match(ROSTER_SQL, /@idNumber = '' OR LTRIM\(RTRIM\(CONVERT\(VARCHAR\(64\), pp\.PeopleID\)\)\) = @idNumber/);
+  assert.match(ROSTER_SQL, /SELECT pp\.PeopleID, pp\.EmployeeID,/);
+  assert.match(ROSTER_SQL, /@idNumber = '' OR LTRIM\(RTRIM\(CONVERT\(VARCHAR\(64\), pp\.EmployeeID\)\)\) = @idNumber/);
+  assert.doesNotMatch(ROSTER_SQL, /pp\.PeopleID\)\) = @idNumber/);
   assert.doesNotMatch(ROSTER_SQL, /\d{4}-\d{2}/); // no value is interpolated into the statement
 });
 
+test("a database without EmployeeID shows and filters PeopleID, and still matches absences on it", async () => {
+  assert.equal(await readEmployeeIdColumn(async () => [
+    { name: "EventUTCTime", kind: "datetime" },
+    { name: "EmployeeID", kind: "nvarchar" },
+  ]), "EmployeeID");
+  assert.equal(await readEmployeeIdColumn(async () => [{ name: "EventUTCTime", kind: "datetime" }]), "PeopleID");
+  assert.equal(await readEmployeeIdColumn(async () => { throw new Error("denied"); }), "PeopleID");
+  // The badge column's type must not be mistaken for the time column's.
+  assert.deepEqual(await readReportShape(async () => [
+    { name: "EmployeeID", kind: "nvarchar" },
+    { name: "EventUTCTime", kind: "datetime" },
+  ]), { timeKind: "datetime", identity: "EmployeeID" });
+
+  const calls = [];
+  const queryFn = async (sql, params) => {
+    calls.push({ sql, params });
+    if (/INFORMATION_SCHEMA/.test(sql)) return [{ name: "EventUTCTime", kind: "datetime" }];
+    const aliased = /AS EmployeeID/.test(sql);
+    if (/IsActive/.test(sql)) {
+      assert.equal(sql, rosterSqlFor("PeopleID"));
+      return roster.map((person) => (aliased ? { ...person, EmployeeID: person.PeopleID } : person));
+    }
+    assert.equal(sql, statementFor("datetime", "PeopleID"));
+    assert.match(sql, /CONVERT\(VARCHAR\(64\), pp\.PeopleID\)\)\) = @idNumber/);
+    assert.doesNotMatch(sql, /pp\.EmployeeID/);
+    return swipesIn(params).map((row) => (aliased ? { ...row, EmployeeID: row.PeopleID } : row));
+  };
+  const out = await attendance.run({ date: "2026-10-06", idNumber: "9" }, { tz: 1, queryFn, now: NOW });
+  assert.equal(calls[1].params.idNumber, "9");
+  assert.equal(calls[2].params.idNumber, "9");
+  const ben = out.find((row) => row.name === "Nwosu Ben");
+  assert.equal(ben.status, "Present");
+  assert.equal(ben.idNumber, 9); // the alias put PeopleID in the badge column
+  assert.notEqual(ben.idNumber, "E-1009");
+});
+
 test("a person listed twice in the roster is reported once per day", async () => {
-  const doubled = [...roster, { PeopleID: 11, Firstname: "Chi", Lastname: "Eze", Department: "Ops" }];
+  const doubled = [...roster, { PeopleID: 11, EmployeeID: null, Firstname: "Chi", Lastname: "Eze", Department: "Ops" }];
   const queryFn = async (sql) => {
     if (/INFORMATION_SCHEMA/.test(sql)) return [{ kind: "datetime" }];
     if (/IsActive/.test(sql)) return doubled;
     return [];
   };
   const out = await attendance.run({ date: "2026-10-05" }, { tz: 1, queryFn, now: NOW });
-  assert.equal(out.filter((r) => r.idNumber === 11).length, 1);
+  assert.equal(out.filter((r) => r.name === "Eze Chi").length, 1);
+  assert.equal(out.find((r) => r.name === "Eze Chi").idNumber, "—");
 });
 
 test("a future day is never reported absent, for a single date, a range or a month", async () => {
@@ -666,7 +757,7 @@ test("absentRows needs no database and respects the cut-off and the weekend sett
 test("runPeriod returns the swipes and the absences as separate lists", async () => {
   const { queryFn } = fakeQuery();
   const { present, absent } = await runPeriod({ date: "2026-10-05" }, { tz: 1, queryFn, now: NOW });
-  assert.deepEqual(present.map((r) => r.name), ["Obi Ada"]);
+  assert.deepEqual(present.map((r) => r.name), ["Obi Ada", "Unknown"]);
   assert.deepEqual(absent.map((r) => r.name), ["Eze Chi", "Nwosu Ben"]); // sorted by department, then name
 });
 
@@ -794,14 +885,16 @@ test("Excel export follows the export template", async () => {
   await rangeBook.xlsx.load(await toXlsx(attendance, reportRows, rangeParams));
   const rangeSheet = rangeBook.worksheets[0];
   assert.deepEqual(headersOf(rangeSheet, 4), [
-    "Date", "Day", "Name", "Employee ID", "Department", "Status", "Card no.", "First entry", "Last entry", "Duration", "Swipes",
+    "Date", "Day", "Name", "Employee ID", "Card no.", "Department", "First entry", "Last entry", "Duration", "Swipes", "Status",
   ]);
   assert.match(rangeSheet.getRow(2).getCell(1).value, /Attendance from 2026-10-05 to 2026-10-07/);
   // A department is cut into its Present and Absent blocks, each with its own heading and count.
   assert.equal(rangeSheet.getRow(5).getCell(1).value, "Ops — Present (2)");
   assert.equal(rangeSheet.getRow(6).getCell(1).value, "2026-10-05");
   assert.equal(rangeSheet.getRow(6).getCell(2).value, "Monday");
-  assert.equal(rangeSheet.getRow(6).getCell(5).value, "Ops");
+  assert.equal(rangeSheet.getRow(6).getCell(5).value, 1234); // Card no. sits next to Employee ID
+  assert.equal(rangeSheet.getRow(6).getCell(6).value, "Ops");
+  assert.equal(rangeSheet.getRow(6).getCell(11).value, "Present"); // Status closes the row
   assert.equal(rangeSheet.getRow(8).getCell(1).value, "Security — Present (1)");
   assert.equal(rangeSheet.getRow(9).getCell(3).value, "Nwosu Ben");
 
@@ -818,8 +911,8 @@ test("CSV export uses the same columns, with a BOM for Excel", () => {
   const csv = toCsv(attendance, reportRows, normalizeParams({ mode: "range", start: "2026-10-05", end: "2026-10-07" })).toString("utf8");
   assert.equal(csv.startsWith("\uFEFF"), true);
   const [head, first] = csv.replace(/^\uFEFF/, "").split("\r\n");
-  assert.equal(head, "Date,Day,Name,Employee ID,Department,Status,Card no.,First entry,Last entry,Duration,Swipes");
-  assert.equal(first, "2026-10-05,Monday,Obi Ada,7,Ops,Present,1234,08:01:02,17:12:00,9h 11m,2");
+  assert.equal(head, "Date,Day,Name,Employee ID,Card no.,Department,First entry,Last entry,Duration,Swipes,Status");
+  assert.equal(first, "2026-10-05,Monday,Obi Ada,7,1234,Ops,08:01:02,17:12:00,9h 11m,2,Present");
   assert.equal(csv.includes('"—"'), false); // the em dash needs no quoting
 });
 
@@ -834,7 +927,14 @@ test("CSV quotes separators and quotes inside a value", () => {
 });
 
 test("HTML (Electron PDF source) export follows the export template", () => {
-  const rangeHtml = toHtml(attendance, reportRows, normalizeParams({ mode: "range", start: "2026-10-05", end: "2026-10-07" }), "Reports Desk");
+  const rangeParams = normalizeParams({ mode: "range", start: "2026-10-05", end: "2026-10-07" });
+  const rangeHtml = toHtml(attendance, reportRows, rangeParams, "Reports Desk");
+  const screenLabels = exportColumnsFor(rangeParams).map((c) => c.label);
+  const printedLabels = [...rangeHtml.matchAll(/<th class="[^"]*">([^<]*)<\/th>/g)].map((m) => m[1]);
+  assert.deepEqual(printedLabels, screenLabels);
+  assert.deepEqual(printedLabels, [
+    "Date", "Day", "Name", "Employee ID", "Card no.", "Department", "First entry", "Last entry", "Duration", "Swipes", "Status",
+  ]);
   assert.match(rangeHtml, /<th class="">Date<\/th>/);
   assert.match(rangeHtml, /<th class="">Day<\/th>/);
   assert.match(rangeHtml, /<th class="">Employee ID<\/th>/);

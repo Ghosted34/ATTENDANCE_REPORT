@@ -47,8 +47,10 @@ test("the report list advertises the mode select, a single-date default and mode
     assert.equal(report.columns.some((c) => c.key === "day"), false);
     assert.equal(report.columns.some((c) => c.key === "department"), true); // on screen, not only in the export
     assert.deepEqual(report.columns.map((c) => c.label), [
-      "Name", "Employee ID", "Department", "Status", "Card no.", "First entry", "Last entry", "Duration", "Swipes",
+      "Name", "Employee ID", "Card no.", "Department", "First entry", "Last entry", "Duration", "Swipes", "Status",
     ]);
+    assert.equal(report.columns.at(-1).label, "Status");
+    assert.equal(report.columns[report.columns.findIndex((c) => c.label === "Employee ID") + 1].label, "Card no.");
     assert.match(report.description, /Absent/);
     // Sections are cut twice: a department's Present rows and its Absent rows are separate blocks.
     assert.deepEqual(report.groupBy, ["department", "status"]);
@@ -65,6 +67,7 @@ test("invalid dates and reversed ranges are rejected with 400 before the databas
       ["/api/reports/attendance/data?mode=range&start=&end=", /valid start date and end date/],
       ["/api/reports/attendance/data?mode=week&date=2026-10-05", /Single date/],
       ["/api/reports/attendance/data?date=2026-10-05&idNumber=7%20OR%201%3D1", /Employee ID can only contain/],
+      ["/api/reports/attendance/data?date=2026-10-05&employeeId=7%20OR%201%3D1", /Employee ID can only contain/],
       ["/api/reports/attendance/data?mode=month&month=2026-13", /valid month/],
       ["/api/reports/attendance/data?mode=month&month=2026-02-01", /valid month/],
       ["/api/reports/attendance/data?mode=month", /valid month/],
