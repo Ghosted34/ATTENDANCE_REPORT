@@ -6,3 +6,6 @@ debug.*
 dist
 uploads/
 logs/
+
+# Preview harness (dev-only, not for production)
+.preview/

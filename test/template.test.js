@@ -82,10 +82,30 @@ test("tableHtml renders group headings, alignment and wrapping", () => {
   });
   assert.match(html, /<tr class="grp"><td colspan="3">Ops \(1\)<\/td><\/tr>/);
   assert.match(html, /<tr class="grp"><td colspan="3">Security \(1\)<\/td><\/tr>/);
-  assert.match(html, /<th class="right">Swipes<\/th>/);
+  assert.match(html, /<th scope="col" class="right">Swipes<\/th>/);
   assert.match(html, /<td class="wrap">Ops<\/td>/);
   assert.equal(tableHtml({ columns, groupBy: null, rows: [{ name: "A", department: "D", accessCount: 1 }] })
     .includes("grp"), false);
+  // Verify accessibility attributes are present
+  assert.match(html, /aria-label="Report grouped by department"/);
+  assert.match(html, /<caption class="sr-only">/);
+  assert.match(html, /<th scope="col" class="">Name<\/th>/);
+});
+
+test("tableHtml includes accessibility attributes for all headers", () => {
+  const columns = [{ key: "name", label: "Name" }, { key: "age", label: "Age", align: "right" }];
+  const html = tableHtml({ columns, groupBy: null, rows: [{ name: "A", age: 30 }] });
+  assert.match(html, /<th scope="col" class="">Name<\/th>/);
+  assert.match(html, /<th scope="col" class="right">Age<\/th>/);
+  assert.match(html, /aria-label="Report"/);
+  assert.match(html, /<caption class="sr-only">Report<\/caption>/);
+});
+
+test("tableHtml with custom statusPill renders status as pills", () => {
+  const statusPill = (status) => `<span class="pill ${status}">${status}</span>`;
+  const columns = [{ key: "name", label: "Name" }, { key: "status", label: "Status" }];
+  const html = tableHtml({ columns, groupBy: null, rows: [{ name: "A", status: "Present" }], statusPill });
+  assert.match(html, /<span class="pill Present">Present<\/span>/);
 });
 
 test("tableHtml cuts a section further when groupBy lists more than one column", () => {

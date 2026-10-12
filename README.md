@@ -2,6 +2,21 @@
 
 Attendance Reports runs in two modes: a standalone local web server opened in your browser, or the Electron desktop app. **Their configuration is separate:** local browser mode reads `.env`; Electron always uses its JSON settings store.
 
+## Look and feel
+
+Reports Desk uses a clean, tool-grade design inspired by Linear and Vercel dashboards:
+
+- **Dense but calm:** Monochrome palette with a single teal accent color (#0f766e light / #2dd4bf dark)
+- **Precise typography:** System font stack with deliberate scale (11px-22px) using only 400/500/600 weights
+- **Subtle hierarchy:** 1px borders instead of shadows, 4-8px radii, minimal elevation
+- **Table craft:** Sticky header and frozen first column, subtle zebra striping (3-5% tint), row hover states, tabular-numeric alignment for numbers
+- **Status without color:** Present/Absent shown as small pills with inline SVG icons plus text labels
+- **States:** Clear not-run, running (with progress bar and spinner), empty, and error states
+- **Density toggle:** Comfortable (40px) or compact (32px) row heights, persisted via cookie
+- **Accessibility:** WCAG 2.2 AA compliant with proper focus rings, aria-live regions, table semantics (caption, scope attributes)
+
+All styling uses semantic design tokens defined in `renderer/app/css/styles.css` for both light and dark themes.
+
 ## Requirements
 
 - Node.js 20 or newer and npm
