@@ -261,7 +261,6 @@ function reportView(id) {
       </div>
     </form>
     <div class="table-wrap hidden" id="out" role="region" aria-label="Report results"></div>
-    <div id="resultsInfo" class="hidden"></div>
     <div id="progressBar" class="progress hidden"><i id="progressInner"></i></div></main>`;
 
   const form = $("#f"), msg = $("#m"), out = $("#out");
@@ -508,12 +507,20 @@ function reportView(id) {
     }
   };
 
+  // An export that ignores the table's order would be a different report from the one on screen,
+  // so the sort travels with the request and the server applies the same comparator.
+  const exportQs = () => {
+    const params = new URLSearchParams(qs());
+    if (currentSort) { params.set("sort", currentSort.key); params.set("dir", currentSort.dir); }
+    return params.toString();
+  };
+
   form.querySelectorAll("[data-x]").forEach((b) => (b.onclick = async () => {
     const ext = b.dataset.x, label = b.dataset.label || b.textContent.trim();
     b.disabled = true; b.textContent = "Preparing\u2026";
     let saved = false;
     try {
-      const blob = await (await api(`/reports/${id}/${ext}?${qs()}`)).blob();
+      const blob = await (await api(`/reports/${id}/${ext}?${exportQs()}`)).blob();
       const a = Object.assign(document.createElement("a"), {
         href: URL.createObjectURL(blob), download: exportFileName(id, valuesNow(), ext),
       });
@@ -538,6 +545,24 @@ function reportView(id) {
 }
 
 /* ---------- Router ---------- */
+
+// Nothing is a full page load here, so the browser has no reason to move focus: a keyboard user
+// who opened a report would be left on a link that no longer exists. Each navigation hands focus
+// to the new page's heading instead — except on the first render (nothing was replaced) and on
+// the sign-in card, which puts focus in the username field itself.
+let renderedRoute = null;
+
+function handFocusToView() {
+  const route_ = location.hash;
+  const navigate = renderedRoute !== null && renderedRoute !== route_;
+  renderedRoute = route_;
+  if (!navigate) return;
+  const heading = view.querySelector("h1");
+  if (!heading || view.querySelector(".auth-card")) return;
+  heading.setAttribute("tabindex", "-1");
+  heading.focus({ preventScroll: true });
+}
+
 function route() {
   const [, page, id] = location.hash.split("/");
   $("#signOut").classList.toggle("hidden", !token);
@@ -546,12 +571,20 @@ function route() {
   if (!token) {
     if (page !== "login") return go("login");
     document.title = `Sign in \u00b7 ${appName}`;
+    renderedRoute = location.hash;
     return loginView();
   }
-  document.title = appName;
-  if (page === "reports" && id) return reportView(id);
-  if (page === "reports") return homeView();
-  go("reports");
+  if (page === "reports" && id) {
+    const report = reportList.find((x) => x.id === id);
+    document.title = report ? `${report.title} \u00b7 ${appName}` : appName;
+    reportView(id);
+  } else if (page === "reports") {
+    document.title = appName;
+    homeView();
+  } else {
+    return go("reports");
+  }
+  handFocusToView();
 }
 
 $("#themeBtn").onclick = () => window.toggleTheme();

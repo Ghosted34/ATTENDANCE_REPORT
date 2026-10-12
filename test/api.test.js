@@ -201,3 +201,84 @@ test("the absentee report is listed beside attendance, with its own name, column
     assert.match((await res.json()).error, /on or before/);
   });
 });
+
+test("an export comes out in the order the table was sorted, and ignores a sort it cannot honour", async () => {
+  // A report whose rows arrive in one order and whose columns are known, so the sheets can be read.
+  // Deliberately not spread from `fixture`: its `columnsFor` hook would keep advertising the
+  // fixture's two columns and the sort below would be rejected as unknown — which is the
+  // safeguard working, not the sort failing.
+  const sortable = {
+    id: "sortable",
+    title: "Sortable report",
+    description: "Rows the exports can be read back from.",
+    params: [],
+    groupBy: null,
+    columns: [{ key: "name", label: "Name" }, { key: "accessCount", label: "Swipes" }],
+    normalize: (values) => ({ ...values }),
+    subtitle: () => "Sortable",
+    run: async () => [
+      { name: "Ada", accessCount: 10 },
+      { name: "Ben", accessCount: 2 },
+      { name: "Chidi", accessCount: null },
+    ],
+  };
+  reports.set(sortable.id, sortable);
+  try {
+    await withApi(async ({ get }) => {
+      const body = async (path) => (await (await get(path)).text());
+      const namesIn = async (path) => (await body(path)).split("\r\n").slice(1).filter(Boolean)
+        .map((line) => line.split(",")[0]);
+
+      // Unsorted: the report's own order.
+      assert.deepEqual(await namesIn("/api/reports/sortable/csv"), ["Ada", "Ben", "Chidi"]);
+
+      // Sorted by a column, in both directions — the same order the table shows, with the blank
+      // value last either way.
+      assert.deepEqual(await namesIn("/api/reports/sortable/csv?sort=name&dir=desc"), ["Chidi", "Ben", "Ada"]);
+      assert.deepEqual(await namesIn("/api/reports/sortable/csv?sort=accessCount&dir=asc"), ["Ben", "Ada", "Chidi"]);
+      assert.deepEqual(await namesIn("/api/reports/sortable/csv?sort=accessCount&dir=desc"), ["Ada", "Ben", "Chidi"]);
+
+      // A sort naming a column this report does not have, or a direction that is not one, leaves
+      // the report's own order rather than trusting the query string.
+      assert.deepEqual(await namesIn("/api/reports/sortable/csv?sort=secret&dir=asc"), ["Ada", "Ben", "Chidi"]);
+      assert.deepEqual(await namesIn("/api/reports/sortable/csv?sort=name&dir=sideways"), ["Ada", "Ben", "Chidi"]);
+      assert.deepEqual(await namesIn("/api/reports/sortable/csv?sort=name"), ["Ada", "Ben", "Chidi"]);
+
+      // A grouped report sorts *inside* its sections, which is what the table does. Sorting the
+      // rows globally would leave each section sorted but reorder the sections themselves — they
+      // appear in the order their first row does — so the sheet would open on a different
+      // department from the one at the top of the screen.
+      const grouped = {
+        ...sortable,
+        id: "grouped",
+        groupBy: "department",
+        run: async () => [
+          { name: "Zara", department: "Warehouse" },
+          { name: "Ada", department: "Front Desk" },
+          { name: "Ben", department: "Warehouse" },
+          { name: "Chidi", department: "Front Desk" },
+        ],
+      };
+      reports.set(grouped.id, grouped);
+      try {
+        const firstColumn = (text) => text.split("\r\n").slice(1).filter(Boolean).map((line) => line.split(",")[0]);
+        // The sections keep the report's own order — its first row is Warehouse, so Warehouse
+        // leads — and only the rows inside them are sorted.
+        const csv = await body("/api/reports/grouped/csv?sort=name&dir=asc");
+        assert.deepEqual(firstColumn(csv), ["Ben", "Zara", "Ada", "Chidi"]);
+        const csvDesc = await body("/api/reports/grouped/csv?sort=name&dir=desc");
+        assert.deepEqual(firstColumn(csvDesc), ["Zara", "Ben", "Chidi", "Ada"]);
+      } finally {
+        reports.delete(grouped.id);
+      }
+
+      // Excel and PDF are built from the same rows, so they are ordered the same way.
+      const xlsx = await get("/api/reports/sortable/xlsx?sort=name&dir=desc");
+      assert.equal(xlsx.status, 200);
+      const pdf = await get("/api/reports/sortable/pdf?sort=name&dir=desc");
+      assert.equal(pdf.status, 200);
+    });
+  } finally {
+    reports.delete(sortable.id);
+  }
+});

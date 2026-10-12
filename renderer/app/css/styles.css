@@ -169,6 +169,13 @@ body {
   outline: none;
 }
 
+/* Navigating hands focus to the page heading (see the router). It is not an interactive control,
+   so it does not wear a control's ring. */
+h1[tabindex="-1"]:focus {
+  outline: none;
+  scroll-margin-top: var(--sp-4);
+}
+
 /* =============================================================================
    TYPOGRAPHY
    ============================================================================ */
@@ -1383,10 +1390,23 @@ td:not(.wrap):not(:first-child) {
     display: none !important;
   }
 
+  /* The screen layout makes the table a flexible row; paper has no viewport to fit into. */
+  main.report {
+    display: block;
+    min-height: 0;
+  }
+
   .table-wrap {
     max-height: none;
     overflow: visible;
     border: none;
+    flex: none;
+    min-height: 0;
+  }
+
+  /* Order is visible in the printed rows themselves; the control and its caret are not. */
+  th .th-sort .caret {
+    display: none;
   }
 
   table {
