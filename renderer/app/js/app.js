@@ -6,8 +6,8 @@ import {
 const $ = (s) => document.querySelector(s);
 const view = $("#view");
 let token = null, reportList = [];
-// The product name from /api/meta; the sign-in card shows it before anything else loads.
-let appName = "Reports";
+// What /api/meta reports: the sign-in card stamps the build from these before anything else loads.
+let appName = "Reports", appVersion = "";
 const PERIOD_WORDS = { single: "date", range: "date range", month: "month" };
 
 async function api(path, opts = {}) {
@@ -64,44 +64,49 @@ function formatSummary(summary) {
 
 /* ---------- Views ---------- */
 
-/** Up to two initials for the sign-in card's mark: "Reports Desk" -> "RD". */
-const initialsOf = (name) =>
-  (String(name).match(/[A-Za-z0-9]+/g) || ["R"]).slice(0, 2).map((word) => word[0].toUpperCase()).join("");
-
-// Eye and eye-off, in two states of the same geometry (the widely used Lucide outlines).
-const EYE = (paths) =>
-  `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75"` +
-  ` stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
-const EYE_SHOW = EYE('<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>');
-const EYE_HIDE = EYE('<path d="M2 2l20 20"/><path d="M6.61 6.61A13.5 13.5 0 0 0 2 12s3 7 10 7a9.7 9.7 0 0 0 5.39-1.61"/><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.4 10.4 0 0 1 12 5c7 0 10 7 10 7a13.2 13.2 0 0 1-1.67 2.68"/>');
+// Field and control glyphs, drawn as the widely used Lucide outlines at 16px.
+const GLYPH = (paths, size = 16) =>
+  `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor"` +
+  ` stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+const GLYPH_USER = GLYPH('<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>');
+const GLYPH_LOCK = GLYPH('<rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>');
+const EYE_SHOW = GLYPH('<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>');
+const EYE_HIDE = GLYPH('<path d="M2 2l20 20"/><path d="M6.61 6.61A13.5 13.5 0 0 0 2 12s3 7 10 7a9.7 9.7 0 0 0 5.39-1.61"/><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.4 10.4 0 0 1 12 5c7 0 10 7 10 7a13.2 13.2 0 0 1-1.67 2.68"/>');
 
 /**
  * Sign in: one card, two fields, one button.
  *
- * The card carries the product mark and name, the fields carry the autocomplete hints a password
- * manager needs, the password has a reveal control, and the submit button reports progress instead
- * of going quiet. Failures surface in the one place the eye is already resting — above the button —
- * with `aria-invalid` on both fields, and the error clears as soon as the user starts fixing it.
+ * The card opens with the product's mark — the same one the top bar draws — so the screen is
+ * identifiably this app's before a word is read, then says what to do and nothing else. Each field
+ * carries a glyph and the autocomplete hints a password manager reads; the password has a reveal
+ * control and a Caps Lock warning. The button reports progress instead of going quiet. A failure
+ * lands above the button — where the eye already is — marks both fields `aria-invalid` (which of
+ * the pair was wrong is exactly what the server does not say), moves focus to the field to retype,
+ * and clears as soon as the user starts fixing it. The footer stamps the build, which is what the
+ * sign-in screen of a desktop app is for.
  */
 function loginView() {
   view.innerHTML = `<main class="auth">
     <div class="auth-stack">
       <form class="auth-card" id="f">
-        <div class="auth-brand">
-          <span class="brand-mark" aria-hidden="true">${esc(initialsOf(appName))}</span>
-          <span class="auth-app">${esc(appName)}</span>
+        <div class="auth-head">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <h1 class="auth-title">Sign in</h1>
+          <p class="auth-sub">Enter your username and password to continue.</p>
         </div>
-        <h1 class="auth-title">Sign in</h1>
-        <p class="auth-sub">Enter your username and password to continue.</p>
 
         <div class="field">
           <label for="u">Username</label>
-          <input id="u" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
+          <div class="input-affix">
+            <span class="field-icon">${GLYPH_USER}</span>
+            <input id="u" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
+          </div>
         </div>
 
         <div class="field">
           <label for="p">Password</label>
           <div class="input-affix">
+            <span class="field-icon">${GLYPH_LOCK}</span>
             <input id="p" name="password" type="password" autocomplete="current-password" required aria-describedby="caps">
             <button type="button" class="reveal" id="reveal" aria-label="Show password" aria-pressed="false">${EYE_SHOW}</button>
           </div>
@@ -115,7 +120,10 @@ function loginView() {
           <span class="spinner hidden" id="subSpin"></span>
         </button>
       </form>
-      <p class="auth-note">Local development build — sign in with <code>admin</code> / <code>admin</code></p>
+      <footer class="auth-foot">
+        <p class="auth-note">Local development build — sign in with <code>admin</code> / <code>admin</code></p>
+        ${appVersion ? `<p class="auth-version">${esc(appName)} ${esc(appVersion)}</p>` : ""}
+      </footer>
     </div>
   </main>`;
 
@@ -532,6 +540,7 @@ if (densityBtn) {
 
 $("#signOut").onclick = () => { token = null; reportList = []; go("login"); };
 addEventListener("hashchange", route);
-fetch("/api/meta").then((r) => r.json()).then(({ name }) => {
-  appName = name; $("#brand").textContent = name; document.title = name;
+fetch("/api/meta").then((r) => r.json()).then(({ name, version }) => {
+  appName = name; appVersion = version || "";
+  $("#brand").textContent = name; document.title = name;
 }).finally(route);

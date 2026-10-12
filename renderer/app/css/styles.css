@@ -41,6 +41,9 @@
   --danger: #b42318;
   --danger-soft: #fee2e2;
 
+  /* The product mark (server/brand.js names the product; this draws it) */
+  --mark-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Cpath d='M12 2L2 7v10c0 5.55 3.84 9.74 9 11 5.16-1.26 9-5.45 9-11V7l-10-5z'/%3E%3C/svg%3E");
+
   /* Focus & Elevation */
   --ring: #0f766e;
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.05);
@@ -242,16 +245,18 @@ p {
   gap: var(--sp-2);
 }
 
-/* Monogram mark - CSS-only SVG */
+/* The product's mark: the shield, knocked out of an accent block. Kept as a token so the top bar
+   and the sign-in card cannot drift apart. */
 .bar .brand::before {
   content: "";
   display: inline-block;
+  flex: none;
   width: 24px;
   height: 24px;
   background: var(--accent);
   border-radius: var(--radius);
-  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Cpath d='M12 2L2 7v10c0 5.55 3.84 9.74 9 11 5.16-1.26 9-5.45 9-11V7l-10-5z'/%3E%3C/svg%3E");
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Cpath d='M12 2L2 7v10c0 5.55 3.84 9.74 9 11 5.16-1.26 9-5.45 9-11V7l-10-5z'/%3E%3C/svg%3E");
+  mask: var(--mark-mask);
+  -webkit-mask: var(--mark-mask);
 }
 
 .bar .divider {
@@ -377,7 +382,10 @@ textarea:focus-visible {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-input:invalid:not(:focus) {
+/* Only after the user has something to fix: an untouched empty field is not an error in
+   progress, and a sign-in form that opens with two red boxes reads as broken. `:user-invalid`
+   matches once the field has been typed in and left, or a submit was attempted. */
+input:user-invalid {
   border-color: var(--danger);
 }
 
@@ -463,6 +471,7 @@ textarea {
    centres it without cutting off its top when the window is short: auto margins collapse to
    zero instead of overflowing, and the page scrolls. */
 .auth {
+  position: relative;
   max-width: none;
   min-height: calc(100vh - var(--header-height));
   display: flex;
@@ -470,7 +479,18 @@ textarea {
   padding: var(--sp-8) var(--sp-4);
 }
 
+/* A wash of the accent behind the card, so the screen looks composed rather than empty. It is
+   decoration only: it never takes a click, and it is the same token in both themes. */
+.auth::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(70% 32% at 50% 0%, var(--accent-soft), transparent 72%);
+  pointer-events: none;
+}
+
 .auth-stack {
+  position: relative;
   width: 100%;
   max-width: 380px;
   margin: auto;
@@ -487,32 +507,24 @@ textarea {
   box-shadow: var(--shadow-2);
 }
 
-.auth-brand {
+.auth-head {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: var(--sp-2);
+  text-align: center;
   margin-bottom: var(--sp-6);
 }
 
-/* Monogram: the product's initials, standing in for a logo asset. */
+/* The product mark, drawn with the top bar's shield and at twice its size. */
 .brand-mark {
-  flex: none;
-  width: 28px;
-  height: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius);
+  display: block;
+  width: 40px;
+  height: 40px;
+  margin-bottom: var(--sp-4);
   background: var(--accent);
-  color: var(--accent-ink);
-  font-size: var(--text-hint);
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-
-.auth-app {
-  font-size: var(--text-emph);
-  font-weight: 600;
+  /* The mask is the shape; no radius, so nothing can clip the shield's edges. */
+  mask: var(--mark-mask);
+  -webkit-mask: var(--mark-mask);
 }
 
 .auth-title {
@@ -522,18 +534,35 @@ textarea {
 .auth-sub {
   color: var(--ink-2);
   font-size: var(--text-body);
-  margin-bottom: var(--sp-6);
 }
 
-/* Reveal control, sitting inside the password field. */
+/* A field with a glyph set inside it. */
 .input-affix {
   position: relative;
 }
 
 .input-affix input {
+  padding-left: 36px;
   padding-right: 40px;
 }
 
+.input-affix .field-icon {
+  position: absolute;
+  top: 50%;
+  left: var(--sp-3);
+  transform: translateY(-50%);
+  display: inline-flex;
+  color: var(--ink-3);
+  pointer-events: none;
+  transition: color 0.1s ease;
+}
+
+/* The field and its glyph light up together while it has the caret. */
+.input-affix:focus-within .field-icon {
+  color: var(--accent);
+}
+
+/* Reveal control, sitting inside the password field. */
 .input-affix .reveal {
   position: absolute;
   top: 50%;
@@ -557,11 +586,21 @@ textarea {
   color: var(--ink-1);
 }
 
+/* The one thing to do on this screen gets the size of a real target. */
 .auth-submit {
   width: 100%;
+  padding: var(--sp-3) var(--sp-4);
 }
 
-.auth-note {
+.auth-foot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.auth-note,
+.auth-version {
   text-align: center;
   font-size: var(--text-meta);
   color: var(--ink-3);

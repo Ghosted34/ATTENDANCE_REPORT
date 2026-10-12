@@ -1,7 +1,7 @@
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
-import { brand } from "./brand.js";
+import { brand, version } from "./brand.js";
 import { login, requireAuth } from "./auth.js";
 import { reports } from "./reports/registry.js";
 import { toCsv, toXlsx, toHtml } from "./reports/export.js";
@@ -26,7 +26,7 @@ export function createApp({ secret, getConfig, renderPdf }) {
   });
 
   app.get("/api/live", (_req, res) => res.json({ ok: true }));
-  app.get("/api/meta", (_req, res) => res.json({ name: brand.name }));
+  app.get("/api/meta", (_req, res) => res.json({ name: brand.name, version }));
 
   app.post("/api/auth/login", wrap(async (req, res) => {
     const token = await login(req.body?.username, req.body?.password);

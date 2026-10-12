@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import fs from "node:fs";
 import { createApp } from "../server/app.js";
 import { reports } from "../server/reports/registry.js";
 
@@ -105,7 +106,10 @@ test("the app only serves loopback clients unless an Electron token is configure
     assert.equal((await fetch(`${base}/api/meta`)).status, 403); // standalone mode with a secret set
     const withToken = await fetch(`${base}/api/meta`, { headers: { "x-app-token": "sea" } });
     assert.equal(withToken.status, 200);
-    assert.deepEqual(await withToken.json(), { name: "Reports Desk" });
+    // The sign-in card stamps its build from these two.
+    const meta = await withToken.json();
+    assert.equal(meta.name, "Reports Desk");
+    assert.equal(meta.version, JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
