@@ -154,20 +154,22 @@ const spansDays = (params = {}) =>
 // Screen columns. Status makes absence explicit: "Present" when the person swiped that day,
 // "Absent" when an active employee did not. Department is a column of its own as well as the
 // section heading, so a row keeps saying where its person works however the table is read.
+// `minWidth` travels with the column, so a width stays on the column it was meant for however
+// many columns a report or a period puts in front of it.
 const COLUMNS = [
-  { key: "name", label: "Name" },
-  { key: "idNumber", label: "Employee ID" },
-  { key: "department", label: "Department" },
-  { key: "status", label: "Status" },
-  { key: "cardNumber", label: "Card no." },
-  { key: "firstEntry", label: "First entry" },
-  { key: "lastEntry", label: "Last entry" },
-  { key: "duration", label: "Duration" },
-  { key: "accessCount", label: "Swipes", align: "right" },
+  { key: "name", label: "Name", minWidth: 150 },
+  { key: "idNumber", label: "Employee ID", minWidth: 80 },
+  { key: "department", label: "Department", minWidth: 120 },
+  { key: "status", label: "Status", minWidth: 80 },
+  { key: "cardNumber", label: "Card no.", minWidth: 80 },
+  { key: "firstEntry", label: "First entry", minWidth: 80 },
+  { key: "lastEntry", label: "Last entry", minWidth: 80 },
+  { key: "duration", label: "Duration", minWidth: 80 },
+  { key: "accessCount", label: "Swipes", align: "right", minWidth: 60 },
 ];
 
-const DATE_COLUMN = { key: "date", label: "Date" };
-const DAY_COLUMN = { key: "day", label: "Day" };
+const DATE_COLUMN = { key: "date", label: "Date", minWidth: 80 };
+const DAY_COLUMN = { key: "day", label: "Day", minWidth: 80 };
 
 /**
  * Every period leads with the weekday (**Day**, e.g. "Monday") and a period covering more than one

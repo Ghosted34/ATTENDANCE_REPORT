@@ -1,10 +1,13 @@
 import {
   escapeHtml as esc, exportFileName, paramFieldsHtml, resolveReportParams, tableHtml,
+  groupByToggleHtml, emptyStateHtml, viewStateOf, visibleColumns, withViewState, VIEW_KEYS,
 } from "./template.js";
 
 const $ = (s) => document.querySelector(s);
 const view = $("#view");
 let token = null, reportList = [];
+// What /api/meta reports: the sign-in card stamps the build from these before anything else loads.
+let appName = "Reports", appVersion = "";
 const PERIOD_WORDS = { single: "date", range: "date range", month: "month" };
 
 async function api(path, opts = {}) {
@@ -17,6 +20,53 @@ async function api(path, opts = {}) {
   return res;
 }
 const go = (p) => { location.hash = "#/" + p; };
+
+/**
+ * The app's address space is the hash, so the query a report view carries is the hash's:
+ * `#/reports/attendance?mode=range&start=2026-10-05&sort=name&dir=asc`. A real query string is
+ * still read as a fallback, so a link made the other way round keeps working.
+ */
+const hashQuery = () => {
+  const at = location.hash.indexOf("?");
+  return new URLSearchParams(at >= 0 ? location.hash.slice(at + 1) : location.search);
+};
+
+let renderedRoute = null;
+
+/**
+ * Closes the Columns panel if it is open. It lives out here because the panel is rebuilt with
+ * every report view, and one listener on the document is better than one more added each time.
+ */
+function closeColumnsMenu() {
+  const panel = $("#columnsPanel");
+  if (!panel || panel.classList.contains("hidden")) return;
+  panel.classList.add("hidden");
+  $("#columnsBtn")?.setAttribute("aria-expanded", "false");
+}
+
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".columns-menu")) closeColumnsMenu();
+});
+
+/**
+ * Rewrites the query the current view carries: no hashchange, so nothing re-routes and the form
+ * and table keep their state. `search` is the `?...` produced by `withViewState`, or "".
+ */
+function replaceHashQuery(id, search) {
+  const next = `#/reports/${id}${search}`;
+  if (location.hash === next) return;
+  try {
+    // Only the hash changes, which is the one history write a `file://` page is allowed, so this
+    // works in the desktop window as well as in a browser.
+    history.replaceState(null, "", next);
+  } catch {
+    // If a future engine refuses it, the view simply stays out of the address: the page keeps
+    // working, and the window is still remembered in the cookie.
+    return;
+  }
+  // The route the reader is looking at has changed, so this is not a navigation to hand focus for.
+  renderedRoute = location.hash;
+}
 
 /* ---------- Helper: Status Pills ---------- */
 function statusPill(status) {
@@ -60,36 +110,167 @@ function formatSummary(summary) {
 }
 
 /* ---------- Views ---------- */
+
+// Field and control glyphs, drawn as the widely used Lucide outlines at 16px.
+const GLYPH = (paths, size = 16) =>
+  `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor"` +
+  ` stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+const GLYPH_USER = GLYPH('<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>');
+const GLYPH_LOCK = GLYPH('<rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>');
+const EYE_SHOW = GLYPH('<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>');
+const EYE_HIDE = GLYPH('<path d="M2 2l20 20"/><path d="M6.61 6.61A13.5 13.5 0 0 0 2 12s3 7 10 7a9.7 9.7 0 0 0 5.39-1.61"/><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.4 10.4 0 0 1 12 5c7 0 10 7 10 7a13.2 13.2 0 0 1-1.67 2.68"/>');
+
+/**
+ * Sign in: one card, two fields, one button.
+ *
+ * The card opens with the product's mark — the same one the top bar draws — so the screen is
+ * identifiably this app's before a word is read, then says what to do and nothing else. Each field
+ * carries a glyph and the autocomplete hints a password manager reads; the password has a reveal
+ * control and a Caps Lock warning. The button reports progress instead of going quiet. A failure
+ * lands above the button — where the eye already is — marks both fields `aria-invalid` (which of
+ * the pair was wrong is exactly what the server does not say), moves focus to the field to retype,
+ * and clears as soon as the user starts fixing it. The footer stamps the build, which is what the
+ * sign-in screen of a desktop app is for.
+ */
 function loginView() {
-  view.innerHTML = `<form class="panel" id="f">
-    <h1>Sign in</h1>
-    <div class="field"><label for="u">Username</label><input id="u" autocomplete="username" required autofocus></div>
-    <div class="field"><label for="p">Password</label><input id="p" type="password" autocomplete="current-password" required></div>
-    <div class="msg err" id="m" role="alert"></div>
-    <button class="btn primary" style="width:100%">Sign in</button>
-    <p class="hint" style="margin-top:var(--sp-4);text-align:center">Temporary sign-in: admin / admin</p></form>`;
-  $("#f").onsubmit = async (e) => {
+  view.innerHTML = `<main class="auth">
+    <div class="auth-stack">
+      <form class="auth-card" id="f">
+        <div class="auth-head">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <h1 class="auth-title">Sign in</h1>
+          <p class="auth-sub">Enter your username and password to continue.</p>
+        </div>
+
+        <div class="field">
+          <label for="u">Username</label>
+          <div class="input-affix">
+            <span class="field-icon">${GLYPH_USER}</span>
+            <input id="u" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="p">Password</label>
+          <div class="input-affix">
+            <span class="field-icon">${GLYPH_LOCK}</span>
+            <input id="p" name="password" type="password" autocomplete="current-password" required aria-describedby="caps">
+            <button type="button" class="reveal" id="reveal" aria-label="Show password" aria-pressed="false">${EYE_SHOW}</button>
+          </div>
+          <p class="hint hidden" id="caps" role="status">Caps Lock is on.</p>
+        </div>
+
+        <div class="msg" id="m" role="alert"></div>
+
+        <button class="btn primary auth-submit" id="sub" type="submit">
+          <span id="subText">Sign in</span>
+          <span class="spinner hidden" id="subSpin"></span>
+        </button>
+      </form>
+      <footer class="auth-foot">
+        <p class="auth-note">Local development build — sign in with <code>admin</code> / <code>admin</code></p>
+        ${appVersion ? `<p class="auth-version">${esc(appName)} ${esc(appVersion)}</p>` : ""}
+      </footer>
+    </div>
+  </main>`;
+
+  const form = $("#f"), user = $("#u"), pass = $("#p"), msg = $("#m");
+  const submit = $("#sub"), submitText = $("#subText"), submitSpinner = $("#subSpin");
+  const reveal = $("#reveal"), caps = $("#caps");
+
+  const setError = (text) => {
+    msg.textContent = text;
+    // The red box only exists while there is something wrong. Both fields are handed back to the
+    // user marked invalid: which of the pair was wrong is exactly what the server does not say.
+    msg.className = text ? "msg err" : "msg";
+    user.setAttribute("aria-invalid", String(Boolean(text)));
+    pass.setAttribute("aria-invalid", String(Boolean(text)));
+    if (text) (user.value ? pass : user).focus();
+  };
+
+  // The error belongs to the attempt that produced it: typing clears it.
+  const clearError = () => { if (msg.textContent) setError(""); };
+  user.addEventListener("input", clearError);
+  pass.addEventListener("input", clearError);
+
+  // Caps Lock is the most common reason a correct password is refused.
+  const syncCaps = (event) => {
+    const on = typeof event.getModifierState === "function" && event.getModifierState("CapsLock");
+    caps.classList.toggle("hidden", !on);
+  };
+  pass.addEventListener("keydown", syncCaps);
+  pass.addEventListener("keyup", syncCaps);
+  pass.addEventListener("blur", () => caps.classList.add("hidden"));
+
+  reveal.addEventListener("click", () => {
+    const hiding = pass.type === "text";
+    pass.type = hiding ? "password" : "text";
+    const label = hiding ? "Show password" : "Hide password";
+    reveal.setAttribute("aria-pressed", String(!hiding));
+    reveal.setAttribute("aria-label", label);
+    reveal.innerHTML = hiding ? EYE_SHOW : EYE_HIDE;
+    pass.focus();
+  });
+
+  form.onsubmit = async (e) => {
     e.preventDefault();
+    if (submit.disabled) return; // one attempt at a time
+    setError("");
+    submit.disabled = true;
+    submit.setAttribute("aria-busy", "true");
+    submitText.textContent = "Signing in";
+    submitSpinner.classList.remove("hidden");
     try {
-      const res = await api("/auth/login", { method: "POST", body: JSON.stringify({ username: $("#u").value, password: $("#p").value }) });
+      const res = await api("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ username: user.value.trim(), password: pass.value }),
+      });
       token = (await res.json()).token;
       reportList = await (await api("/reports")).json();
       go("reports");
-    } catch (err) { $("#m").textContent = err.message; }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      submit.disabled = false;
+      submit.removeAttribute("aria-busy");
+      submitText.textContent = "Sign in";
+      submitSpinner.classList.add("hidden");
+    }
   };
 }
 
 function homeView() {
+  const list = reportList.map((r) =>
+    `<a href="#/reports/${r.id}"><strong>${esc(r.title)}</strong><span class="muted">${esc(r.description)}</span></a>`).join("");
   view.innerHTML = `<main><h1>Reports</h1><p class="muted">Choose a report to run.</p>
-    <div class="list">${reportList.map((r) =>
-      `<a href="#/reports/${r.id}"><strong>${esc(r.title)}</strong><span class="muted">${esc(r.description)}</span></a>`).join("")}</div></main>`;
+    ${list ? `<div class="list">${list}</div>` : `<div class="empty" role="status">
+      <h3>No reports are available</h3>
+      <p>This build registered none. Check the server log for a report that failed to load.</p>
+    </div>`}</main>`;
 }
 
 function reportView(id) {
   const r = reportList.find((x) => x.id === id);
   if (!r) return go("reports");
-  // The report's own template fills in its fields; extra query-string keys travel through.
-  const { values, extra } = resolveReportParams(r);
+
+  // Three sources, in order of authority: the URL (a view someone linked or reloaded), the
+  // cookies (the preference they last set) and the report's own defaults.
+  const fromUrl = hashQuery();
+  const urlView = viewStateOf(fromUrl);
+  const { values, extra: forwarded } = resolveReportParams(r, { query: fromUrl });
+  // The view keys describe how the page is read, not what the report is asked for: they must not
+  // travel to it as report parameters (which would also make them appear in every export URL).
+  const extra = forwarded.filter(({ name }) => !VIEW_KEYS.includes(name));
+
+  // Where the URL does not name a window, the last one this report was run with is offered, so
+  // reopening "Absentees" does not silently start over at today.
+  const remembered = window.getLastWindow?.(id);
+  if (remembered) {
+    for (const field of r.params || []) {
+      if (!fromUrl.has(field.name) && remembered[field.name]) values[field.name] = remembered[field.name];
+    }
+  }
+  let hiddenColumns = window.getHiddenColumns?.(id) || [];
 
   // Build segmented control for mode
   const modeOptions = r.params?.find(p => p.name === "mode")?.options || [];
@@ -100,18 +281,23 @@ function reportView(id) {
              class="btn"
              data-mode="${esc(opt.value)}"
              aria-pressed="${opt.value === modeValue}"
+             tabindex="${opt.value === modeValue ? "0" : "-1"}"
              ${opt.value === modeValue ? 'aria-current="true"' : ''}>
       ${esc(opt.label)}
     </button>`
   ).join("");
 
-  // Build the mode field (hidden select for form submission)
+  // The mode travels as a hidden input: the segmented control above draws it and keeps this in
+  // step, and `paramFieldsHtml` is told to omit the field so no second mode input can reach the
+  // server (a duplicate would arrive at the report as "single,single" and fail validation).
   const modeSelect = r.params?.find(p => p.name === "mode")
     ? `<input type="hidden" name="mode" id="p_mode" value="${esc(modeValue)}">`
     : "";
 
-  // Get groupBy preference
-  const useGroupBy = window.getGroupBy !== undefined ? window.getGroupBy() : true;
+  // Grouping: the URL outranks the cookie, which outranks the default.
+  const useGroupBy = urlView.groupBy !== null
+    ? window.setGroupBy?.(urlView.groupBy) ?? urlView.groupBy
+    : (window.getGroupBy !== undefined ? window.getGroupBy() : true);
 
   view.innerHTML = `<main class="report">
     <a class="back" href="#/reports">All reports</a>
@@ -125,32 +311,46 @@ function reportView(id) {
         <div class="segmented-control" id="modeSegments">${modeSegments}</div>
         ${modeSelect}
       </div>
-      ${paramFieldsHtml(r, values).replace(/<div class="field" data-mode="[^"]*"><label for="p_mode">[\s\S]*?<\/div>/g, '')}
-      <button class="btn primary" id="runBtn">
+      ${paramFieldsHtml(r, values, { omit: ["mode"] })}
+      <button class="btn primary" id="runBtn" aria-keyshortcuts="Control+Enter" data-tooltip="Run report (Ctrl+Enter)">
         <span id="runBtnText">Run report</span>
         <span id="runBtnSpinner" class="spinner hidden"></span>
       </button>
       <span class="spacer"></span>
       <div class="export-group" id="exportGroup">
-        <button type="button" class="btn" data-x="xlsx" disabled data-tooltip="Export to Excel">Excel</button>
-        <button type="button" class="btn" data-x="csv" disabled data-tooltip="Export to CSV">CSV</button>
-        <button type="button" class="btn" data-x="pdf" disabled data-tooltip="Export to PDF">PDF</button>
+        <button type="button" class="btn" data-x="xlsx" data-label="Excel" disabled data-tooltip="Export to Excel">Excel</button>
+        <button type="button" class="btn" data-x="csv" data-label="CSV" disabled data-tooltip="Export to CSV">CSV</button>
+        <button type="button" class="btn" data-x="pdf" data-label="PDF" disabled data-tooltip="Export to PDF">PDF</button>
       </div>
       <div class="field" style="margin-left:auto">
         <label>&nbsp;</label>
-        <div class="segmented-control" id="groupByToggle" style="width:auto" data-tooltip="Toggle grouped view by department">
-          <button type="button" class="btn" data-groupby="true" aria-pressed="${useGroupBy}" aria-current="${useGroupBy ? 'true' : 'false'}">Grouped</button>
-          <button type="button" class="btn" data-groupby="false" aria-pressed="${!useGroupBy}" aria-current="${!useGroupBy ? 'true' : 'false'}">Flat</button>
+        ${groupByToggleHtml(useGroupBy)}
+      </div>
+      <div class="field columns-field">
+        <label>&nbsp;</label>
+        <div class="columns-menu">
+          <button type="button" class="btn" id="columnsBtn" aria-expanded="false"
+                  aria-controls="columnsPanel" data-tooltip="Show or hide columns">
+            <span id="columnsCount">Columns</span>
+          </button>
+          <div class="columns-panel hidden" id="columnsPanel" role="group" aria-label="Columns to show">
+            <p class="columns-title">Show columns</p>
+            <div class="columns-list" id="columnsList"></div>
+            <p class="columns-note">Excel, CSV and PDF always include every column.</p>
+          </div>
         </div>
       </div>
     </form>
-    <div class="table-wrap hidden" id="out" role="region" aria-live="polite"></div>
-    <div id="resultsInfo" class="hidden"></div>
+    <div class="table-wrap hidden" id="out" role="region" aria-label="Report results"></div>
     <div id="progressBar" class="progress hidden"><i id="progressInner"></i></div></main>`;
 
   const form = $("#f"), msg = $("#m"), out = $("#out");
   const modeSegmentsEl = $("#modeSegments");
   const groupByToggleEl = $("#groupByToggle");
+  const columnsBtn = $("#columnsBtn");
+  const columnsPanel = $("#columnsPanel");
+  const columnsList = $("#columnsList");
+  const columnsCount = $("#columnsCount");
   const runBtn = $("#runBtn");
   const runBtnText = $("#runBtnText");
   const runBtnSpinner = $("#runBtnSpinner");
@@ -158,7 +358,7 @@ function reportView(id) {
   const exportGroup = $("#exportGroup");
 
   // Current groupBy state
-  let currentGroupBy = window.getGroupBy !== undefined ? window.getGroupBy() : true;
+  let currentGroupBy = useGroupBy;
 
   const valuesNow = () => Object.fromEntries(new FormData(form));
   // Only the visible fields are submitted; the URL's extra keys are appended untouched.
@@ -172,6 +372,52 @@ function reportView(id) {
     msg.textContent = t;
     msg.className = "report-meta msg " + cls;
   };
+
+  const OK_ICON = '<svg class="ok-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"' +
+    ' stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M20 6 9 17l-5-5"/></svg>';
+
+  /** Success message with a checkmark; the text is escaped and the icon is ours. */
+  const setOk = (t) => {
+    msg.innerHTML = `${OK_ICON}<span>${esc(t)}</span>`;
+    msg.className = "report-meta msg ok";
+  };
+
+  /**
+   * Arrow keys walk a segmented control the way a radio group does. The group is one stop in the
+   * tab order — the current option — and the rest are reached by arrow, which is what a pair of
+   * mutually exclusive switches should feel like. Moving selects, since nothing here is destructive
+   * and the table is not re-queried.
+   */
+  const wireSegmentedKeys = (container) => {
+    const buttons = () => [...container.querySelectorAll("button")];
+    const sync = () => {
+      const list = buttons();
+      const current = list.find((b) => b.getAttribute("aria-pressed") === "true") || list[0];
+      for (const button of list) button.tabIndex = button === current ? 0 : -1;
+    };
+    container.addEventListener("keydown", (e) => {
+      const step = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 }[e.key];
+      const list = buttons();
+      const index = list.indexOf(document.activeElement);
+      if (index < 0) return;
+      let next = null;
+      if (step) next = (index + step + list.length) % list.length;
+      else if (e.key === "Home") next = 0;
+      else if (e.key === "End") next = list.length - 1;
+      else return;
+      e.preventDefault();
+      // Take the same path a mouse click takes, so state, cookie and table stay in one place.
+      list[next].click();
+      list[next].focus();
+      sync();
+    });
+    sync();
+    return sync;
+  };
+
+  const syncModeTabs = modeSegmentsEl ? wireSegmentedKeys(modeSegmentsEl) : null;
+  let syncGroupTabs = null;
 
   // Handle segmented control for mode
   if (modeSegmentsEl) {
@@ -192,11 +438,13 @@ function reportView(id) {
 
       // Sync field visibility
       syncMode();
+      syncModeTabs?.();
     });
   }
 
   // Handle segmented control for groupBy
   if (groupByToggleEl) {
+    syncGroupTabs = wireSegmentedKeys(groupByToggleEl);
     groupByToggleEl.addEventListener('click', (e) => {
       const btn = e.target.closest('button[data-groupby]');
       if (!btn) return;
@@ -212,14 +460,11 @@ function reportView(id) {
       currentGroupBy = groupBy;
       window.toggleGroupBy();
 
-      // Re-render table if results are visible
-      if (!out.classList.contains('hidden') && latestRows.length > 0) {
-        const cols = latestColumns.length ? latestColumns : r.columns;
-        const summary = computeSummary(latestRows, currentGroupBy ? r.groupBy : null);
-        const summaryText = formatSummary(summary);
-        setMsg(`${latestSubtitle} \u00b7 ${summaryText}`);
-        out.innerHTML = tableHtml({ columns: cols, groupBy: currentGroupBy ? r.groupBy : null, rows: latestRows, statusPill });
-      }
+      syncGroupTabs?.();
+      // Re-render through the one path, so the summary, sort caption and address stay in step —
+      // and, when there is no table yet, at least the address does.
+      if (!out.classList.contains("hidden") && latestRows.length > 0) renderTable();
+      else syncViewInUrl();
     });
   }
 
@@ -242,10 +487,144 @@ function reportView(id) {
     return "";
   };
 
+  // Empty-state actions. "Try Absentees" carries this window over in the query string and then
+  // switches reports with a hash change, so the in-memory session token survives (a reload would
+  // sign the user out). "Change Date" returns to the field the current period is read from.
+  const openAbsentees = () => {
+    const url = new URL(location.href);
+    url.search = qs();
+    history.replaceState(null, "", url);
+    go("reports/absentees");
+  };
+
+  const focusPeriodField = () => {
+    const mode = valuesNow().mode || "single";
+    const field = form.querySelector(`.field[data-mode="${mode}"] input`);
+    if (!field) return;
+    field.scrollIntoView({ block: "center", behavior: "smooth" });
+    field.focus();
+    // Chromium opens the calendar on demand; it needs the click that got us here.
+    if (typeof field.showPicker === "function") { try { field.showPicker(); } catch { /* ignore */ } }
+  };
+
+  const showEmpty = () => {
+    // The Absentees report shares this window, but not on its own empty state.
+    const canRunAbsentees = id !== "absentees" && reportList.some((x) => x.id === "absentees");
+    const period = PERIOD_WORDS[valuesNow().mode || "single"] || PERIOD_WORDS.single;
+    out.classList.remove("hidden");
+    out.innerHTML = emptyStateHtml({ period, canRunAbsentees });
+    out.querySelector('[data-empty-action="absentees"]')?.addEventListener("click", openAbsentees);
+    out.querySelector('[data-empty-action="date"]')?.addEventListener("click", focusPeriodField);
+  };
+
   // Store latest rows and columns for re-rendering when toggling groupBy
   let latestRows = [];
   let latestColumns = [];
   let latestSubtitle = "";
+  let currentSort = urlView.sort;
+  // The window this report has been run with: what the address should carry once it has.
+  let runWindow = {};
+
+  /** The short name of the column the table is ordered by, for the status line. */
+  const sortCaption = () => {
+    if (!currentSort) return "";
+    const column = latestColumns.find((c) => c.key === currentSort.key);
+    return column ? ` \u00b7 Sorted by ${column.label}, ${currentSort.dir === "desc" ? "descending" : "ascending"}` : "";
+  };
+
+  /**
+   * Draws the table from the rows already in hand. Both switches that change the view without
+   * re-running the report — Grouped/Flat and a header click — come through here, so the table,
+   * the summary and the sort caption cannot disagree about what is on screen.
+   */
+  const renderTable = () => {
+    if (!latestRows.length) return;
+    const cols = latestColumns.length ? latestColumns : r.columns;
+    // A sort survives a change of period, but not the disappearance of its column. The caption
+    // looks the column up in the full list, so hiding a column cannot break the sort it created.
+    const sort = currentSort && cols.some((c) => c.key === currentSort.key) ? currentSort : null;
+    currentSort = sort;
+    const summary = computeSummary(latestRows, currentGroupBy ? r.groupBy : null);
+    setMsg(`${latestSubtitle} · ${formatSummary(summary)}${sortCaption()}`);
+    syncColumnsMenu(cols);
+    out.classList.remove("hidden");
+    out.innerHTML = tableHtml({
+      columns: visibleColumns(cols, hiddenColumns),
+      groupBy: currentGroupBy ? r.groupBy : null, rows: latestRows, statusPill, sort,
+    });
+    syncViewInUrl();
+  };
+
+  /**
+   * How a report is being read belongs in the address, so the view survives a reload and a link.
+   * The window is written too, once a report has actually been run with it.
+   */
+  const syncViewInUrl = () => {
+    const params = hashQuery();
+    for (const [name, value] of Object.entries(runWindow)) params.set(name, value);
+    replaceHashQuery(id, withViewState(params, { sort: currentSort, groupBy: currentGroupBy }));
+  };
+
+  /* ---------- Columns ---------- */
+
+  /** The panel lists the columns actually in play, so it follows the report and the period. */
+  const syncColumnsMenu = (cols) => {
+    const shown = visibleColumns(cols, hiddenColumns).length;
+    columnsCount.textContent = shown === cols.length ? "Columns" : `Columns (${shown}/${cols.length})`;
+    columnsList.innerHTML = cols.map((column) => `
+      <label class="columns-item">
+        <input type="checkbox" value="${esc(column.key)}"${hiddenColumns.includes(column.key) ? "" : " checked"}>
+        <span>${esc(column.label)}</span>
+      </label>`).join("");
+  };
+
+  const openColumnsMenu = (open) => {
+    columnsPanel.classList.toggle("hidden", !open);
+    columnsBtn.setAttribute("aria-expanded", String(open));
+    if (open) columnsList.querySelector("input")?.focus();
+  };
+
+  columnsBtn.addEventListener("click", () => openColumnsMenu(columnsPanel.classList.contains("hidden")));
+
+  // One listener for the panel, however often its contents are rebuilt. A hidden column is a
+  // preference, not a way to lose the table: the last visible one cannot be switched off.
+  columnsList.addEventListener("change", (e) => {
+    const checkbox = e.target.closest("input[type=checkbox]");
+    if (!checkbox) return;
+    const keys = [...columnsList.querySelectorAll("input[type=checkbox]")];
+    let hidden = keys.filter((input) => !input.checked).map((input) => input.value);
+    if (hidden.length === keys.length) {
+      checkbox.checked = true;
+      hidden = hidden.filter((key) => key !== checkbox.value);
+    }
+    hiddenColumns = hidden;
+    window.setHiddenColumns?.(id, hiddenColumns);
+    renderTable();
+  });
+
+  // Escape closes the panel and hands focus back to the button that opened it.
+  columnsPanel.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    openColumnsMenu(false);
+    columnsBtn.focus();
+  });
+
+  // Before a run there are no results to list yet, so the report's own columns are offered: what
+  // is switched off there is honoured by the first run.
+  syncColumnsMenu(r.columns);
+
+  // A click on any header orders the table by that column: ascending, descending, then back to
+  // the report's own order, which is what the third click is for. The listener is on the
+  // container, so it survives every re-render of the table inside it.
+  out.addEventListener("click", (e) => {
+    const button = e.target.closest("[data-sort-key]");
+    if (!button) return;
+    const key = button.dataset.sortKey;
+    if (!currentSort || currentSort.key !== key) currentSort = { key, dir: "asc" };
+    else if (currentSort.dir === "asc") currentSort = { key, dir: "desc" };
+    else currentSort = null;
+    renderTable();
+  });
 
   form.onsubmit = async (e) => {
     e.preventDefault();
@@ -273,19 +652,11 @@ function reportView(id) {
     try {
       const { rows, subtitle, columns } = await (await api(`/reports/${id}/data?${qs()}`)).json();
       const cols = columns?.length ? columns : r.columns;
-      const period = PERIOD_WORDS[valuesNow().mode || "single"] || PERIOD_WORDS.single;
 
       // Store for re-rendering
       latestRows = rows;
       latestColumns = cols;
       latestSubtitle = subtitle;
-
-      // Compute summary
-      const summary = computeSummary(rows, currentGroupBy ? r.groupBy : null);
-      const summaryText = formatSummary(summary);
-
-      // Update message with summary
-      setMsg(`${subtitle} \u00b7 ${summaryText}`);
 
       // Hide loading state
       progressBar.classList.add("hidden");
@@ -293,17 +664,21 @@ function reportView(id) {
       runBtnText.textContent = "Run report";
       runBtnSpinner.classList.add("hidden");
 
+      // The window that worked is the one to offer next time, and the one in the address — so a
+      // reload or a shared link reopens the same report rather than today's.
+      const used = valuesNow();
+      const window_ = Object.fromEntries(
+        (r.params || []).map((field) => [field.name, used[field.name]]).filter(([, value]) => value !== undefined && value !== ""),
+      );
+      window.setLastWindow?.(id, window_);
+      runWindow = window_;
+      syncViewInUrl();
+
       if (rows.length) {
-        out.classList.remove("hidden");
-        out.innerHTML = tableHtml({ columns: cols, groupBy: currentGroupBy ? r.groupBy : null, rows, statusPill });
+        renderTable(); // sets the summary line and draws the table
         exportGroup.querySelectorAll("[data-x]").forEach((b) => (b.disabled = false));
       } else {
-        out.classList.remove("hidden");
-        out.innerHTML = `<div class="empty" role="status">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 9h6v6H9z"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg>
-          <h3>No records for this ${period}</h3>
-          <p>Try another ${period}, or run the Absentees report for the same window.</p>
-        </div>`;
+        showEmpty();
       }
     } catch (err) {
       progressBar.classList.add("hidden");
@@ -332,18 +707,32 @@ function reportView(id) {
     }
   };
 
+  // An export that ignores the table's order would be a different report from the one on screen,
+  // so the sort travels with the request and the server applies the same comparator.
+  const exportQs = () => {
+    const params = new URLSearchParams(qs());
+    if (currentSort) { params.set("sort", currentSort.key); params.set("dir", currentSort.dir); }
+    return params.toString();
+  };
+
   form.querySelectorAll("[data-x]").forEach((b) => (b.onclick = async () => {
-    const ext = b.dataset.x, label = b.textContent;
+    const ext = b.dataset.x, label = b.dataset.label || b.textContent.trim();
     b.disabled = true; b.textContent = "Preparing\u2026";
+    let saved = false;
     try {
-      const blob = await (await api(`/reports/${id}/${ext}?${qs()}`)).blob();
+      const blob = await (await api(`/reports/${id}/${ext}?${exportQs()}`)).blob();
       const a = Object.assign(document.createElement("a"), {
         href: URL.createObjectURL(blob), download: exportFileName(id, valuesNow(), ext),
       });
       a.click(); URL.revokeObjectURL(a.href);
-      setMsg(`Saved ${label} file to Downloads.`, "ok");
+      saved = true;
+      setOk(`Saved ${label} file.`);
     } catch (err) { setMsg(err.message, "err"); }
-    b.disabled = false; b.textContent = label;
+    b.disabled = false;
+    if (!saved) { b.textContent = label; return; }
+    // The button itself confirms the save, then goes back to its own name.
+    b.textContent = "\u2713 Saved!";
+    setTimeout(() => { if (b.textContent === "\u2713 Saved!") b.textContent = label; }, 1600);
   }));
 
   // Add Ctrl+Enter shortcut
@@ -356,18 +745,64 @@ function reportView(id) {
 }
 
 /* ---------- Router ---------- */
+
+// Nothing is a full page load here, so the browser has no reason to move focus: a keyboard user
+// who opened a report would be left on a link that no longer exists. Each navigation hands focus
+// to the new page's heading instead — except on the first render (nothing was replaced) and on
+// the sign-in card, which puts focus in the username field itself.
+function handFocusToView() {
+  const route_ = location.hash;
+  const navigate = renderedRoute !== null && renderedRoute !== route_;
+  renderedRoute = route_;
+  if (!navigate) return;
+  const heading = view.querySelector("h1");
+  if (!heading || view.querySelector(".auth-card")) return;
+  heading.setAttribute("tabindex", "-1");
+  heading.focus({ preventScroll: true });
+}
+
 function route() {
-  const [, page, id] = location.hash.split("/");
+  const [, page, rest] = location.hash.split("/");
+  const id = rest?.split("?")[0];
   $("#signOut").classList.toggle("hidden", !token);
-  if (!token) { if (page !== "login") return go("login"); return loginView(); }
-  if (page === "reports" && id) return reportView(id);
-  if (page === "reports") return homeView();
-  go("reports");
+  // Row height only means something where there is a table to set it for.
+  densityBtn?.classList.toggle("hidden", !token);
+  if (!token) {
+    if (page !== "login") return go("login");
+    document.title = `Sign in \u00b7 ${appName}`;
+    renderedRoute = location.hash;
+    return loginView();
+  }
+  if (page === "reports" && id) {
+    const report = reportList.find((x) => x.id === id);
+    document.title = report ? `${report.title} \u00b7 ${appName}` : appName;
+    reportView(id);
+  } else if (page === "reports") {
+    document.title = appName;
+    homeView();
+  } else {
+    return go("reports");
+  }
+  handFocusToView();
 }
 
 $("#themeBtn").onclick = () => window.toggleTheme();
+
+// Density lives in the top bar next to the theme: it is a property of the desk, not of a report.
+const densityBtn = $("#densityBtn");
+if (densityBtn) {
+  const syncDensity = () => {
+    const compact = (document.documentElement.dataset.density || "comfortable") === "compact";
+    densityBtn.setAttribute("aria-pressed", String(compact));
+    densityBtn.dataset.tooltip = compact ? "Row density: compact (32px)" : "Row density: comfortable (40px)";
+  };
+  densityBtn.onclick = () => { window.toggleDensity(); syncDensity(); };
+  syncDensity();
+}
+
 $("#signOut").onclick = () => { token = null; reportList = []; go("login"); };
 addEventListener("hashchange", route);
-fetch("/api/meta").then((r) => r.json()).then(({ name }) => {
+fetch("/api/meta").then((r) => r.json()).then(({ name, version }) => {
+  appName = name; appVersion = version || "";
   $("#brand").textContent = name; document.title = name;
 }).finally(route);

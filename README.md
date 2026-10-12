@@ -9,13 +9,30 @@ Reports Desk uses a clean, tool-grade design inspired by Linear and Vercel dashb
 - **Dense but calm:** Monochrome palette with a single teal accent color (#0f766e light / #2dd4bf dark)
 - **Precise typography:** System font stack with deliberate scale (11px-22px) using only 400/500/600 weights
 - **Subtle hierarchy:** 1px borders instead of shadows, 4-8px radii, minimal elevation
-- **Table craft:** Sticky header and frozen first column, subtle zebra striping (3-5% tint), row hover states, tabular-numeric alignment for numbers
+- **Table craft:** Sticky header and frozen first column, with a **sticky department heading** — scrolling a 31-day grouped report keeps the section you are reading named under the header — subtle zebra striping (3-5% tint), row hover states, tabular-numeric alignment for numbers, and a **sortable header** on every column — click once for ascending, twice for descending, a third time for the report's own order. Sorting orders the rows inside each department heading, and the status line says which way round it is
+- **Column widths travel with the column:** each column in a report definition carries its own `minWidth`, rather than a stylesheet guessing from its position in the table
 - **Status without color:** Present/Absent shown as small pills with inline SVG icons plus text labels
-- **States:** Clear not-run, running (with progress bar and spinner), empty, and error states
-- **Density toggle:** Comfortable (40px) or compact (32px) row heights, persisted via cookie
-- **Accessibility:** WCAG 2.2 AA compliant with proper focus rings, aria-live regions, table semantics (caption, scope attributes)
+- **The view is in the address:** Which column the table is sorted by, whether rows are grouped, and the window the report was last run with all travel in the app's own address — `#/reports/attendance?mode=range&start=2026-10-05&end=2026-10-07&sort=name&dir=asc&group=grouped`. A reload keeps the view, and the address can be pasted into a message to hand someone the same one. The view keys are taken out before the window is sent to the report, so a report is asked about a window and not about a sort
+- **A report remembers its window:** the dates (or month, or day) a report was last run with are stored per report and offered again next time, so reopening *Absentees* does not silently start over at today. `#/reports/absentees` reopens the day that was last run; a link that names a date still wins
+- **Columns can be hidden:** the **Columns** button in the toolbar lists the columns the run actually has and switches them off one at a time — handy at the 900px minimum window, where eleven columns are cramped. The last visible column cannot be switched off, the choice is remembered per report, and exports and PDFs still carry every column
+- **Keyboard, not just mouse:** both segmented controls are a radio group — one stop in the tab order (the option that is on), with **Left/Right** or **Up/Down** moving between options, **Home/End** jumping to the ends, and Escape closing the Columns panel and returning focus to its button
+- **One switch per choice:** The period is a segmented control (Single date / Date range / Month) that mirrors the report's own `mode` field, and the table is switched between **By Dept** and **All Together** from the toolbar with icons and tooltips
+- **States:** Clear not-run, running (with progress bar and spinner), empty, and error states — the empty state names the period that came back empty and offers the next step (**Try Absentees** carries the same window across, **Change Date**/Change Month returns to the field)
+- **Exports that confirm, and match the screen:** A saved Excel, CSV or PDF file answers with a checkmark in the header and on the button itself, and comes out **in the order the table was sorted** — the sort travels with the request and the server applies the same comparator, ordering the rows inside each section exactly as the table does. The viewport, the file, and the printed sheet cannot disagree
+- **Focus follows navigation:** Because this is a single page, each navigation hands focus to the new page's heading, so a keyboard user is never left on a link that has been replaced. The window title names the report, not just the product
+- **Density toggle:** Comfortable (40px) or compact (32px) row heights from the top bar, persisted via cookie
+- **Sign in:** One card carrying the product mark and name, a reveal control on the password, a button that reports progress instead of going quiet, and one error that marks both fields and clears as soon as the user starts fixing it
+- **Accessibility:** WCAG 2.2 AA, and the contrast is *computed* rather than claimed — `test/ui.test.js` reads the tokens out of the stylesheet and fails if any token that carries words drops below 4.5:1, or if the non-text token (`--ink-3`, used for icons and separators only) drops below 3:1. Focus rings, `aria-sort` on the sorted column, and table semantics (a `caption` naming the table, `scope` on every header, no duplicate label)
 
 All styling uses semantic design tokens defined in `renderer/app/css/styles.css` for both light and dark themes.
+
+The app icon is drawn from the brand's own geometry rather than checked in by hand:
+
+```bash
+node assets/make-icon.mjs      # rewrites assets/icon.png (512x512) from the shield mark
+```
+
+`electron-builder.json` points at `assets/icon.png`, so the installer, the taskbar entry and the packaged app all carry the same shield that the top bar and the sign-in card draw. A development run (`npm start`) still shows the stock Electron icon, which is normal — the icon is baked in when the app is packaged.
 
 ## Requirements
 
@@ -164,7 +181,7 @@ Every report is one definition in `server/reports/`, rendered through a shared t
 
 - **Fixed inputs** — anything the report lists, with `type` `date`, `text` or `number`, or an `options` list. They are always rendered and always submitted; `default`, `optional`, `placeholder` and `hint` shape them.
 - **Defaults** — a field's own `default` wins; date fields otherwise start on today, and `mode`-tagged fields are hidden and disabled until that mode is selected.
-- **Dynamic (extra) inputs** — any *other* key in the page URL is passed straight through to the report on every run and export. That is how a URL such as `?mode=range&start=2026-08-16&end=2026-08-19&plant=Lagos` presets the window *and* keeps `plant=Lagos` travelling to the API, so a report can pick up parameters it needs beyond the visible fields. Extra keys are bounded as SQL parameters like every other value; nothing from the URL is ever concatenated into a statement.
+- **Dynamic (extra) inputs** — any *other* key in the report's address is passed straight through to the report on every run and export. That is how a URL such as `#/reports/attendance?mode=range&start=2026-08-16&end=2026-08-19&plant=Lagos` presets the window *and* keeps `plant=Lagos` travelling to the API, so a report can pick up parameters it needs beyond the visible fields. The page's own query string is read the same way, and the three view keys (`sort`, `dir`, `group`) are never passed through. Extra keys are bounded as SQL parameters like every other value; nothing from the URL is ever concatenated into a statement.
 
 **Presentation.** `groupBy` turns rows into sections with a heading and a count. It may be **one column** (`"department"`, as the absentee report uses) or **several** (`["department", "status"]`, as the attendance report uses), in which case every combination gets its own heading and they are nested in the order listed:
 

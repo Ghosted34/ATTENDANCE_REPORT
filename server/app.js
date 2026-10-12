@@ -1,11 +1,16 @@
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
-import { brand } from "./brand.js";
+import { brand, version } from "./brand.js";
 import { login, requireAuth } from "./auth.js";
 import { reports } from "./reports/registry.js";
 import { toCsv, toXlsx, toHtml } from "./reports/export.js";
 import { toPdf } from "./reports/pdf.js";
+// The renderer's template module is the DOM-free home of the report presentation rules (its own
+// docstring says so, and the tests import it from both sides), so the ordering an export uses is
+// the very function the table sorts with — one comparator, so the sheet cannot come out in a
+// different order from the screen it was exported from.
+import { sectionsOf, sortRows } from "../renderer/app/js/template.js";
 
 const web = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "renderer", "app");
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
@@ -26,7 +31,7 @@ export function createApp({ secret, getConfig, renderPdf }) {
   });
 
   app.get("/api/live", (_req, res) => res.json({ ok: true }));
-  app.get("/api/meta", (_req, res) => res.json({ name: brand.name }));
+  app.get("/api/meta", (_req, res) => res.json({ name: brand.name, version }));
 
   app.post("/api/auth/login", wrap(async (req, res) => {
     const token = await login(req.body?.username, req.body?.password);
@@ -41,6 +46,24 @@ export function createApp({ secret, getConfig, renderPdf }) {
     res.json([...reports.values()].map(({ id, title, description, params, columns, groupBy }) =>
       ({ id, title, description, params, columns, groupBy }))));
 
+  /**
+   * The rows in the order the reader asked for. The table sorts in the browser for speed and
+   * sends the same request through here, so an exported file comes out ordered like the screen it
+   * came from; a key that is not one of the report's columns is ignored rather than trusted.
+   *
+   * A grouped report is ordered *inside its sections*, which is what the table does: sorting the
+   * rows globally instead would leave each section sorted but reorder the sections themselves
+   * (they appear in the order their first row does), so the sheet would open on a different
+   * department from the one at the top of the screen.
+   */
+  const inRequestedOrder = (rows, columns, query, groupBy) => {
+    const key = String(query.sort ?? "");
+    const dir = query.dir === "desc" ? "desc" : query.dir === "asc" ? "asc" : "";
+    if (!key || !dir || !columns.some((c) => c.key === key)) return rows;
+    if (!groupBy) return sortRows(rows, { key, dir });
+    return [...sectionsOf(rows, groupBy).values()].flatMap((section) => sortRows(section, { key, dir }));
+  };
+
   const run = async (req) => {
     const report = reports.get(req.params.id);
     if (!report) throw Object.assign(new Error("Unknown report."), { status: 404 });
@@ -49,7 +72,7 @@ export function createApp({ secret, getConfig, renderPdf }) {
     const params = report.normalize ? report.normalize(raw) : raw;
     const rows = await report.run(params, { tz: getConfig().tzOffsetHours });
     const columns = report.columnsFor ? report.columnsFor(params) : report.columns;
-    return { report, params, columns, rows };
+    return { report, params, columns, rows: inRequestedOrder(rows, columns, req.query, report.groupBy) };
   };
 
   api.get("/reports/:id/data", wrap(async (req, res) => {

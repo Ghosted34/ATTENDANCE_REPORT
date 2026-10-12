@@ -71,9 +71,55 @@ export function resolveReportParams(report, { query = parseQuery(location.search
   return { values, extra };
 }
 
-/** The toolbar fields for a report, pre-filled from `values`. */
-export function paramFieldsHtml(report, values = {}) {
-  return (report.params || []).map((p) => {
+/**
+ * The keys that describe *how* a report is being read rather than *what* it asked the database
+ * for: which column it is ordered by, and whether the rows are grouped. They live in the URL so a
+ * view can be bookmarked and shared, and they are kept out of what travels to the report — a
+ * report is asked about a window, not about a sort.
+ */
+export const VIEW_KEYS = Object.freeze(["sort", "dir", "group"]);
+
+/** The view a query string asks for. `null` means "not specified here", not "false". */
+export function viewStateOf(search = "") {
+  const query = search instanceof URLSearchParams ? search : parseQuery(search);
+  const dir = query.get("dir") === "desc" ? "desc" : query.get("dir") === "asc" ? "asc" : null;
+  const key = (query.get("sort") || "").trim();
+  const group = query.get("group");
+  return {
+    sort: key && dir ? { key, dir } : null,
+    groupBy: group === "grouped" ? true : group === "flat" ? false : null,
+  };
+}
+
+/** The same query string with the view state written into it, or taken out of it. */
+export function withViewState(search = "", { sort = null, groupBy = null } = {}) {
+  const params = search instanceof URLSearchParams ? search : parseQuery(search);
+  for (const key of VIEW_KEYS) params.delete(key);
+  if (sort?.key && (sort.dir === "asc" || sort.dir === "desc")) {
+    params.set("sort", sort.key);
+    params.set("dir", sort.dir);
+  }
+  if (groupBy === true || groupBy === false) params.set("group", groupBy ? "grouped" : "flat");
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
+/**
+ * The columns a reader has left visible. Hiding is a view preference, so it can never empty the
+ * table: asking for all of them to go returns the list untouched.
+ */
+export function visibleColumns(columns = [], hidden = []) {
+  const shown = columns.filter((column) => !hidden.includes(column.key));
+  return shown.length ? shown : columns;
+}
+
+/**
+ * The toolbar fields for a report, pre-filled from `values`. A caller that draws a field itself —
+ * the report screen renders the mode as a segmented control with its own hidden input — names it in
+ * `omit`, so the field is left out before it is rendered rather than patched out of the markup.
+ */
+export function paramFieldsHtml(report, values = {}, { omit = [] } = {}) {
+  return (report.params || []).filter((p) => !omit.includes(p.name)).map((p) => {
     const id = `p_${p.name}`;
     const scope = p.mode ? ` data-mode="${escapeHtml(p.mode)}"` : "";
     const label = `<label for="${id}">${escapeHtml(p.label)}</label>`;
@@ -99,35 +145,145 @@ export function defaultStatusPill(status) {
   return label;
 }
 
+/* Inline icons for the toolbar and the states. Decorative only: every control they sit in
+   carries its own text label, so they are hidden from assistive technology. */
+const ICON = (paths, size = 14) =>
+  `<svg class="seg-icon" viewBox="0 0 24 24" width="${size}" height="${size}" fill="none"` +
+  ` stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"` +
+  ` aria-hidden="true">${paths}</svg>`;
+
+/** Stacked layers — rows gathered under a department heading. */
+export const ICON_GROUPED = ICON('<path d="M12 3 3 7.5l9 4.5 9-4.5L12 3Z"/><path d="m3 12.4 9 4.5 9-4.5"/><path d="m3 16.9 9 4.5 9-4.5"/>');
+
+/** Even rows — one flat list. */
+export const ICON_FLAT = ICON('<path d="M3 6h18M3 12h18M3 18h18"/>');
+
+/**
+ * The Grouped/Flat switch at the end of the toolbar: whether the table keeps a heading and a
+ * count per department, or lists every row in one run. Labels name the *outcome* ("By Dept",
+ * "All Together") rather than the mechanism, and each option carries an icon and a tooltip.
+ */
+export function groupByToggleHtml(useGroupBy = true) {
+  const active = (value) => (value === Boolean(useGroupBy) ? "true" : "false");
+  const option = (value, label, tooltip, icon) =>
+    `<button type="button" class="btn" data-groupby="${value}"` +
+    ` aria-pressed="${active(value)}" aria-current="${active(value)}" data-tooltip="${escapeHtml(tooltip)}">` +
+    `${icon}<span>${escapeHtml(label)}</span></button>`;
+  return `<div class="segmented-control" id="groupByToggle" role="group" aria-label="Row grouping" style="width:auto">` +
+    option(true, "By Dept", "Group rows under a heading per department", ICON_GROUPED) +
+    option(false, "All Together", "One flat list of every row", ICON_FLAT) +
+    `</div>`;
+}
+
+/**
+ * The empty state for a run that came back with no rows: what happened, and the two things
+ * worth doing next — open the same window on the Absentees report (`canRunAbsentees`, false on
+ * that report itself and on a deployment that does not offer it), or pick another period.
+ */
+export function emptyStateHtml({ period = "date", canRunAbsentees = false } = {}) {
+  const word = escapeHtml(period);
+  const changeLabel = period === "month" ? "Change Month" : "Change Date";
+  const next = canRunAbsentees
+    ? `<p>Try another ${word}, or run the Absentees report for the same window.</p>`
+    : `<p>Try another ${word}.</p>`;
+  const actions = [
+    canRunAbsentees ? '<button type="button" class="btn" data-empty-action="absentees">Try Absentees</button>' : "",
+    `<button type="button" class="btn" data-empty-action="date">${changeLabel}</button>`,
+  ].filter(Boolean).join("");
+  return `<div class="empty" role="status">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 9h6v6H9z"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg>
+    <h3>No records for this ${word}</h3>
+    ${next}
+    <div class="empty-actions">${actions}</div>
+  </div>`;
+}
+
+/**
+ * Rows in the order the reader asked for: by a column, its own way (numbers numerically, dates
+ * and clock times as text — both sort chronologically that way — names the way a person would).
+ * Rows with nothing in that column stay at the bottom in both directions, which is what people
+ * expect when they sort a report that has blanks in it.
+ */
+export function sortRows(rows, sort = {}) {
+  const { key, dir } = sort || {};
+  if (!key || !dir) return rows;
+  const sign = dir === "desc" ? -1 : 1;
+  const blank = (row) => (row[key] === null || row[key] === undefined || row[key] === "" ? 1 : 0);
+  return rows
+    .map((row, index) => ({ row, index }))
+    .sort((a, b) => {
+      const gaps = blank(a.row) - blank(b.row);
+      if (gaps) return gaps;
+      if (blank(a.row)) return a.index - b.index; // blanks keep their order
+      const left = a.row[key], right = b.row[key];
+      const order = typeof left === "number" && typeof right === "number"
+        ? left - right
+        : String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" });
+      // The index keeps equal values in the order the report produced them.
+      return order ? order * sign : a.index - b.index;
+    })
+    .map(({ row }) => row);
+}
+
+/** The caret on a sorted header. Decoration: `aria-sort` on the cell carries the meaning. */
+const CARET_ASC = '<svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>';
+const CARET_DESC = '<svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
+
+/** Widths are a property of the column, not of its position: `minWidth` in the report's own
+    column list. Keying them to `nth-child` in CSS put the Name column's width on Employee ID as
+    soon as a report or period changed the number of columns in front of it. */
+const widthOf = (column) => {
+  const min = Number(column.minWidth);
+  return Number.isFinite(min) && min > 0 ? ` style="min-width:${min}px"` : "";
+};
+
 /** The results table: sticky head, group headings, right-aligned and wrapping cells. */
-export function tableHtml({ columns, groupBy, rows, statusPill = defaultStatusPill }) {
+export function tableHtml({ columns, groupBy, rows, statusPill = defaultStatusPill, sort = null }) {
+  const sorted = (list) => (sort ? sortRows(list, sort) : list);
   const cells = (row, tag) => columns.map((c) => {
     let value = row[c.key];
+    // A value the report never filled in is a blank cell, not the word "null".
+    if (value === null || value === undefined) value = "";
     // Apply status pill to status column if a custom renderer is provided
     if (c.key === "status" && statusPill !== defaultStatusPill) {
       value = statusPill(value);
     }
-    return `<${tag} class="${cellClass(c)}">${value}</${tag}>`;
+    return `<${tag} class="${cellClass(c)}"${widthOf(c)}>${value}</${tag}>`;
   }).join("");
 
-  const head = `<thead><tr>${columns.map((c) => `<th scope="col" class="${cellClass(c)}">${escapeHtml(c.label)}</th>`).join("")}</tr></thead>`;
+  const head = `<thead><tr>${columns.map((c) => {
+    // aria-sort belongs on the sorted column only, and in words rather than an arrow.
+    const active = sort && sort.key === c.key ? sort.dir : null;
+    const ariaSort = active ? ` aria-sort="${active === "desc" ? "descending" : "ascending"}"` : "";
+    const caret = active === "desc" ? CARET_DESC : active ? CARET_ASC : "";
+    return `<th scope="col" class="${cellClass(c)}"${widthOf(c)}${ariaSort}>` +
+      `<button type="button" class="th-sort" data-sort-key="${escapeHtml(c.key)}">` +
+      `${escapeHtml(c.label)}${caret}</button></th>`;
+  }).join("")}</tr></thead>`;
   const line = (row) => `<tr>${cells(row, "td")}</tr>`;
+  // Each section is its own `<tbody>`, which is what confines the sticky heading to the rows it
+  // names: it is pushed out by the next department rather than piling up with the others.
   let body = "";
   if (groupBy) {
     for (const [name, list] of sectionsOf(rows, groupBy)) {
+      // Sorting orders the rows inside each heading; the headings keep the report's own order, so
+      // sorting by name does not shuffle the departments around.
+      const ordered = sorted(list);
       // A null name means the row has no value for the grouping column: the rows still show, with
       // no heading — the same rule server/reports/export.js follows.
-      body += (name === null ? "" : `<tr class="grp"><td colspan="${columns.length}">${escapeHtml(name)} (${list.length})</td></tr>`) +
-        list.map(line).join("");
+      body += "<tbody>" +
+        (name === null ? "" : `<tr class="grp"><td colspan="${columns.length}">${escapeHtml(name)} (${ordered.length})</td></tr>`) +
+        ordered.map(line).join("") + "</tbody>";
     }
   } else {
-    body = rows.map(line).join("");
+    body = `<tbody>${sorted(rows).map(line).join("")}</tbody>`;
   }
 
-  // Add caption for accessibility
+  // The caption is the table's accessible name: it is announced once, and it is what the
+  // `scope` attributes are read against. An aria-label alongside it would say it all twice.
   const caption = groupBy ? `Report grouped by ${Array.isArray(groupBy) ? groupBy.join(" and ") : groupBy}` : "Report";
 
-  return `<table aria-label="${caption}"><caption class="sr-only">${caption}</caption>${head}<tbody>${body}</tbody></table>`;
+  return `<table${groupBy ? ' class="grouped"' : ""}><caption class="sr-only">${caption}</caption>${head}${body}</table>`;
 }
 
 /** Joins the parts of a composite heading ("Front Desk — Present"), matching server/reports/export.js. */

@@ -26,7 +26,9 @@
   /* Text / Ink */
   --ink-1: #1b2430;
   --ink-2: #5d6b7c;
-  --ink-3: #93a1b1;
+  /* Non-text only (icons, separators, disabled marks): clears the 3:1 floor on every surface,
+     and is deliberately not readable enough to carry words — use --ink-2 for those. */
+  --ink-3: #7e8c9a;
 
   /* Accent (teal) */
   --accent: #0f766e;
@@ -36,10 +38,13 @@
   /* Status colors */
   --ok: #0f766e;
   --ok-soft: #e6f4f1;
-  --warn: #d97706;
+  --warn: #a04a08;
   --warn-soft: #fef3c7;
   --danger: #b42318;
   --danger-soft: #fee2e2;
+
+  /* The product mark (server/brand.js names the product; this draws it) */
+  --mark-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Cpath d='M12 2L2 7v10c0 5.55 3.84 9.74 9 11 5.16-1.26 9-5.45 9-11V7l-10-5z'/%3E%3C/svg%3E");
 
   /* Focus & Elevation */
   --ring: #0f766e;
@@ -79,12 +84,6 @@
   --header-height: 48px;
   --toolbar-height: 56px;
 
-  /* Legacy compatibility */
-  --bg: var(--canvas);
-  --ink: var(--ink-1);
-  --muted: var(--ink-2);
-  --head: var(--surface-2);
-  --danger: var(--danger);
 }
 
 [data-theme="dark"] {
@@ -100,7 +99,8 @@
   /* Text / Ink */
   --ink-1: #e6ebf0;
   --ink-2: #93a1b1;
-  --ink-3: #5d6b7c;
+  /* Non-text only: clears 3:1 on every surface in this theme. See the light theme. */
+  --ink-3: #6e7b8b;
 
   /* Accent (teal - lighter for dark mode) */
   --accent: #2dd4bf;
@@ -169,6 +169,13 @@ body {
   outline: none;
 }
 
+/* Navigating hands focus to the page heading (see the router). It is not an interactive control,
+   so it does not wear a control's ring. */
+h1[tabindex="-1"]:focus {
+  outline: none;
+  scroll-margin-top: var(--sp-4);
+}
+
 /* =============================================================================
    TYPOGRAPHY
    ============================================================================ */
@@ -198,7 +205,7 @@ h2, .text-section {
 
 .text-hint {
   font-size: var(--text-hint);
-  color: var(--ink-3);
+  color: var(--ink-2);
 }
 
 .text-meta {
@@ -242,16 +249,18 @@ p {
   gap: var(--sp-2);
 }
 
-/* Monogram mark - CSS-only SVG */
+/* The product's mark: the shield, knocked out of an accent block. Kept as a token so the top bar
+   and the sign-in card cannot drift apart. */
 .bar .brand::before {
   content: "";
   display: inline-block;
+  flex: none;
   width: 24px;
   height: 24px;
   background: var(--accent);
   border-radius: var(--radius);
-  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Cpath d='M12 2L2 7v10c0 5.55 3.84 9.74 9 11 5.16-1.26 9-5.45 9-11V7l-10-5z'/%3E%3C/svg%3E");
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Cpath d='M12 2L2 7v10c0 5.55 3.84 9.74 9 11 5.16-1.26 9-5.45 9-11V7l-10-5z'/%3E%3C/svg%3E");
+  mask: var(--mark-mask);
+  -webkit-mask: var(--mark-mask);
 }
 
 .bar .divider {
@@ -377,7 +386,10 @@ textarea:focus-visible {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-input:invalid:not(:focus) {
+/* Only after the user has something to fix: an untouched empty field is not an error in
+   progress, and a sign-in form that opens with two red boxes reads as broken. `:user-invalid`
+   matches once the field has been typed in and left, or a submit was attempted. */
+input:user-invalid {
   border-color: var(--danger);
 }
 
@@ -413,7 +425,7 @@ textarea {
 
 .field .hint {
   font-size: var(--text-hint);
-  color: var(--ink-3);
+  color: var(--ink-2);
   margin-top: var(--sp-1);
 }
 
@@ -455,20 +467,159 @@ textarea {
    PANELS & CARDS
    ============================================================================ */
 
-.panel {
+/* =============================================================================
+   SIGN IN
+   ============================================================================ */
+
+/* The card sits in the middle of the space below the top bar. `margin: auto` on the stack
+   centres it without cutting off its top when the window is short: auto margins collapse to
+   zero instead of overflowing, and the page scrolls. */
+.auth {
+  position: relative;
+  max-width: none;
+  min-height: calc(100vh - var(--header-height));
+  min-height: calc(100dvh - var(--header-height));
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-8) var(--sp-4);
+}
+
+/* A wash of the accent behind the card, so the screen looks composed rather than empty. It is
+   decoration only: it never takes a click, and it is the same token in both themes. */
+.auth::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(70% 32% at 50% 0%, var(--accent-soft), transparent 72%);
+  pointer-events: none;
+}
+
+.auth-stack {
+  position: relative;
   width: 100%;
-  max-width: 340px;
-  margin: 12vh auto 0;
-  padding: var(--sp-8) var(--sp-6);
+  max-width: 380px;
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.auth-card {
+  padding: var(--sp-8);
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-2);
 }
 
-.panel h1 {
-  margin-bottom: var(--sp-6);
+.auth-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   text-align: center;
+  margin-bottom: var(--sp-6);
+}
+
+/* The product mark, drawn with the top bar's shield and at twice its size. */
+.brand-mark {
+  display: block;
+  width: 40px;
+  height: 40px;
+  margin-bottom: var(--sp-4);
+  background: var(--accent);
+  /* The mask is the shape; no radius, so nothing can clip the shield's edges. */
+  mask: var(--mark-mask);
+  -webkit-mask: var(--mark-mask);
+}
+
+.auth-title {
+  margin-bottom: var(--sp-1);
+}
+
+.auth-sub {
+  color: var(--ink-2);
+  font-size: var(--text-body);
+}
+
+/* A field with a glyph set inside it. */
+.input-affix {
+  position: relative;
+}
+
+.input-affix input {
+  padding-left: 36px;
+  padding-right: 40px;
+}
+
+.input-affix .field-icon {
+  position: absolute;
+  top: 50%;
+  left: var(--sp-3);
+  transform: translateY(-50%);
+  display: inline-flex;
+  color: var(--ink-3);
+  pointer-events: none;
+  transition: color 0.1s ease;
+}
+
+/* The field and its glyph light up together while it has the caret. */
+.input-affix:focus-within .field-icon {
+  color: var(--accent);
+}
+
+/* Reveal control, sitting inside the password field. */
+.input-affix .reveal {
+  position: absolute;
+  top: 50%;
+  right: var(--sp-1);
+  transform: translateY(-50%);
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.input-affix .reveal:hover {
+  background: var(--surface-2);
+  color: var(--ink-1);
+}
+
+/* The one thing to do on this screen gets the size of a real target. */
+.auth-submit {
+  width: 100%;
+  padding: var(--sp-3) var(--sp-4);
+}
+
+.auth-foot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.auth-note,
+.auth-version {
+  text-align: center;
+  font-size: var(--text-meta);
+  color: var(--ink-2);
+}
+
+.auth-note code {
+  font-size: inherit;
+  color: var(--ink-2);
+}
+
+@media (max-width: 420px) {
+  .auth-card {
+    padding: var(--sp-6);
+  }
 }
 
 .list {
@@ -506,6 +657,14 @@ main {
   max-width: 1100px;
   margin: 0 auto;
   padding: var(--sp-6) var(--sp-4);
+}
+
+/* The report page fills the window so its table can be the flexible row. */
+main.report {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - var(--header-height));
+  min-height: calc(100dvh - var(--header-height));
 }
 
 /* Breadcrumb */
@@ -590,6 +749,10 @@ main {
   flex: 1;
   min-width: 100px;
 }
+.toolbar .field.columns-field {
+  /* The Columns button is as wide as its label, not as wide as a date field. */
+  width: auto;
+}
 
 /* Segmented control for mode selection */
 .segmented-control {
@@ -624,6 +787,19 @@ main {
   border-radius: 0 var(--radius) var(--radius) 0;
 }
 
+.segmented-control button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+/* Icons inside a segmented control (Grouped/Flat): decorative, sized to the label. */
+.seg-icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+
 .segmented-control button[aria-pressed="true"] {
   background: var(--accent);
   color: var(--accent-ink);
@@ -632,6 +808,76 @@ main {
 
 .segmented-control button[aria-pressed="true"]:hover {
   background: var(--accent);
+}
+
+/* -------------------------------------------------------------------------------
+   Columns menu — the disclosure in the toolbar. A panel that floats over the table,
+   so it is positioned; the rows inside it are the switches.
+   ------------------------------------------------------------------------------- */
+
+.columns-menu {
+  position: relative;
+}
+
+.columns-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + var(--sp-2));
+  z-index: 30;
+  width: 220px;
+  padding: var(--sp-2);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-2);
+}
+
+.columns-title {
+  padding: var(--sp-1) var(--sp-2);
+  font-size: var(--text-meta);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--ink-2);
+}
+
+.columns-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.columns-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: var(--sp-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-body);
+  font-weight: 400;
+  color: var(--ink-1);
+  cursor: pointer;
+}
+
+.columns-item:hover {
+  background: var(--surface-2);
+}
+
+/* A checkbox here is a switch, not a value to read: it keeps its native box, sized to the row. */
+.columns-item input {
+  width: auto;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.columns-note {
+  margin-top: var(--sp-1);
+  padding: var(--sp-2);
+  border-top: 1px solid var(--line);
+  font-size: var(--text-meta);
+  color: var(--ink-2);
 }
 
 /* =============================================================================
@@ -723,8 +969,11 @@ main {
   border-radius: var(--radius-lg);
   background: var(--surface);
   overflow: auto;
-  max-height: calc(100vh - 260px);
   position: relative;
+  /* Fills whatever the header, toolbar and summary leave behind, so the page itself never
+     scrolls: `min-height: 0` is what lets a flex child shrink to its share. */
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 /* Density support */
@@ -788,6 +1037,50 @@ td.right {
   font-variant-numeric: tabular-nums;
 }
 
+/* Sortable headers. The button fills the cell so the whole header is the target, and the caret
+   only appears on the column the table is ordered by — with `aria-sort` saying so in words. */
+th .th-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  width: 100%;
+  margin: 0 calc(-1 * var(--sp-3));
+  padding: 0 var(--sp-3);
+  height: var(--table-row-height);
+  border: 0;
+  background: none;
+  font: inherit;
+  font-weight: 600;
+  color: inherit;
+  cursor: pointer;
+  text-align: inherit;
+  font-variant-numeric: inherit;
+}
+
+th.right .th-sort {
+  justify-content: flex-end;
+}
+
+th .th-sort:hover {
+  color: var(--accent);
+}
+
+/* The caret is decoration; the sort state itself is on the th's aria-sort. */
+th .th-sort .caret {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  opacity: 0;
+}
+
+th[aria-sort] .th-sort {
+  color: var(--accent);
+}
+
+th[aria-sort] .th-sort .caret {
+  opacity: 1;
+}
+
 /* Wrapping columns */
 th.wrap,
 td.wrap {
@@ -813,6 +1106,11 @@ tbody tr:hover td {
 
 /* Group heading rows */
 tr.grp td {
+  /* The heading of the section you are reading sits under the column headers rather than
+     scrolling away, which is what keeps a 31-day grouped report legible. */
+  position: sticky;
+  top: var(--table-row-height);
+  z-index: 7;
   background: var(--surface-2) !important;
   font-weight: 600;
   font-size: var(--text-meta);
@@ -842,6 +1140,15 @@ td:first-child {
 
 th:first-child {
   background: var(--surface-2);
+}
+
+/*
+ * A group heading is a single cell spanning the row, so it is also the first child — and the rule
+ * above would put it *under* the rows it is labelling as they scroll past. Named here, after that
+ * rule, with the specificity to win: above the rows, still below the header.
+ */
+tr.grp td:first-child {
+  z-index: 7;
 }
 
 /* Shadow for frozen column when scrolling */
@@ -893,25 +1200,6 @@ td:not(.wrap):not(:first-child) {
 }
 
 /* Fixed column widths */
-th:nth-child(1), td:nth-child(1) { min-width: 80px; } /* Date/Day */
-th:nth-child(2), td:nth-child(2) { min-width: 80px; } /* Day/Date */
-th:nth-child(3), td:nth-child(3) { min-width: 150px; } /* Name */
-th:nth-child(4), td:nth-child(4) { min-width: 80px; } /* ID */
-th:nth-child(5), td:nth-child(5) { min-width: 120px; } /* Department */
-th:nth-child(6), td:nth-child(6) { min-width: 80px; } /* Status */
-th:nth-child(7), td:nth-child(7) { min-width: 80px; } /* Card */
-th:nth-child(8), td:nth-child(8) { min-width: 80px; } /* First entry */
-th:nth-child(9), td:nth-child(9) { min-width: 80px; } /* Last entry */
-th:nth-child(10), td:nth-child(10) { min-width: 80px; } /* Duration */
-th:nth-child(11), td:nth-child(11) { min-width: 60px; } /* Swipes */
-
-/* Empty state */
-.empty {
-  padding: var(--sp-16) var(--sp-4);
-  text-align: center;
-  color: var(--ink-3);
-  background: var(--surface);
-}
 
 .empty svg {
   width: 48px;
@@ -927,8 +1215,24 @@ th:nth-child(11), td:nth-child(11) { min-width: 60px; } /* Swipes */
 }
 
 .empty p {
-  color: var(--ink-3);
+  color: var(--ink-2);
   font-size: var(--text-body);
+}
+
+.empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-6);
+}
+
+/* The checkmark that leads an export confirmation in the report header. */
+.ok-icon {
+  width: 14px;
+  height: 14px;
+  vertical-align: -2px;
+  margin-right: var(--sp-1);
 }
 
 /* =============================================================================
@@ -1014,7 +1318,7 @@ th:nth-child(11), td:nth-child(11) { min-width: 60px; } /* Swipes */
 .placeholder {
   padding: var(--sp-16) var(--sp-4);
   text-align: center;
-  color: var(--ink-3);
+  color: var(--ink-2);
   background: var(--surface);
   border: 1px dashed var(--line);
   border-radius: var(--radius-lg);
@@ -1034,7 +1338,7 @@ th:nth-child(11), td:nth-child(11) { min-width: 60px; } /* Swipes */
 }
 
 .placeholder p {
-  color: var(--ink-3);
+  color: var(--ink-2);
   font-size: var(--text-body);
 }
 
@@ -1174,10 +1478,28 @@ th:nth-child(11), td:nth-child(11) { min-width: 60px; } /* Swipes */
     display: none !important;
   }
 
+  /* The screen layout makes the table a flexible row; paper has no viewport to fit into. */
+  main.report {
+    display: block;
+    min-height: 0;
+  }
+
   .table-wrap {
     max-height: none;
     overflow: visible;
     border: none;
+    flex: none;
+    min-height: 0;
+  }
+
+  /* Order is visible in the printed rows themselves; the control and its caret are not. */
+  th .th-sort .caret {
+    display: none;
+  }
+
+  /* A sticky heading is for a viewport; paper has none. */
+  tr.grp td {
+    position: static !important;
   }
 
   table {
@@ -1242,13 +1564,18 @@ th:nth-child(11), td:nth-child(11) { min-width: 60px; } /* Swipes */
    PERFORMANCE OPTIMIZATIONS
    ============================================================================ */
 
-/* Use content-visibility for large tables */
+/* A month can be thousands of rows, so the browser is asked to skip the rows it cannot see.
+   This is a hint, not a guarantee: containment does not apply to table internals in every
+   engine, and `will-change: transform` — which used to be here — is the opposite of a help, as
+   it asks for a compositing layer per row. */
 .table-wrap tbody {
   content-visibility: auto;
-  contain-intrinsic-size: 1000px 500px;
+  /* The guess for a body nothing has rendered yet: here it is the whole table. */
+  contain-intrinsic-size: auto 1000px;
 }
 
-/* Optimize row rendering */
-tbody tr {
-  will-change: transform;
+/* Grouped, each body is a department — the heading and its rows. The guess is a section, not the
+   whole table, so the scrollbar does not promise thousands of pixels that are not there. */
+.table-wrap table.grouped tbody {
+  contain-intrinsic-size: auto 400px;
 }
