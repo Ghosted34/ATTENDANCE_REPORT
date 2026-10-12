@@ -26,6 +26,13 @@ import { classifyColumn, EVENT_COLUMNS, isDateShapeError, PEOPLE_COLUMNS, withDa
  *     in application code: one per eligible person per local day with no granted swipe, never
  *     for a day after today. That keeps the SQL to one day-grouping statement and one roster.
  *
+ * Rows are ordered in application code, once, for the screen and the exports alike — by department,
+ * then status (Present before Absent), then date, then name — which is also how they are grouped:
+ * `GROUP_BY` cuts every department into a Present section and an Absent section, and each of those
+ * blocks runs by date. Every row carries the weekday of its local date ("day"), which is a column of
+ * every period — a single date names its weekday in the subtitle instead, since it has no Date
+ * column.
+ *
  * Every value still arrives as a bound parameter; nothing from the request is concatenated.
  */
 
@@ -145,10 +152,12 @@ const spansDays = (params = {}) =>
   params.mode ? params.mode !== "single" : Boolean(params.start && params.end && params.start !== params.end);
 
 // Screen columns. Status makes absence explicit: "Present" when the person swiped that day,
-// "Absent" when an active employee did not.
+// "Absent" when an active employee did not. Department is a column of its own as well as the
+// section heading, so a row keeps saying where its person works however the table is read.
 const COLUMNS = [
   { key: "name", label: "Name" },
   { key: "idNumber", label: "Employee ID" },
+  { key: "department", label: "Department" },
   { key: "status", label: "Status" },
   { key: "cardNumber", label: "Card no." },
   { key: "firstEntry", label: "First entry" },
@@ -158,25 +167,30 @@ const COLUMNS = [
 ];
 
 const DATE_COLUMN = { key: "date", label: "Date" };
-
-/** Adds the Date column in front of the rows whenever a period covers more than one day. */
-const withDateColumn = (columns, params) => (spansDays(params) ? [DATE_COLUMN, ...columns] : [...columns]);
-
-/** The printed/exported template repeats Department after the Employee ID (see the README). */
-const withDepartment = (columns) => {
-  const at = columns.findIndex((c) => c.key === "idNumber") + 1;
-  return [...columns.slice(0, at), { key: "department", label: "Department" }, ...columns.slice(at)];
-};
-
-export const columnsFor = (params = {}) => withDateColumn(COLUMNS, params);
+const DAY_COLUMN = { key: "day", label: "Day" };
 
 /**
- * Printed/exported template: it repeats the grouping column per row, so a sheet that is
- * filtered or sorted still says who belongs to which department.
+ * Every period leads with the weekday (**Day**, e.g. "Monday") and a period covering more than one
+ * day adds **Date** in front of it, so the two halves of a row's date stay next to each other. A
+ * single date has no Date column — its weekday is in the subtitle as well.
  */
-export const exportColumnsFor = (params = {}) => withDepartment(columnsFor(params));
+export const periodColumnsFor = (columns, params = {}) =>
+  (spansDays(params) ? [DATE_COLUMN, DAY_COLUMN, ...columns] : [DAY_COLUMN, ...columns]);
 
-/** "Attendance for …" / "Absentees for …", naming the day, the range or the month and its length. */
+export const columnsFor = (params = {}) => periodColumnsFor(COLUMNS, params);
+
+/**
+ * Screen and exports use one column list: Department is on screen too, so there is nothing left to
+ * insert into an exported sheet for it. Exports still read `exportColumnsFor` when a report has
+ * one, which is what lets the printable template differ from the table.
+ */
+export const exportColumnsFor = (params = {}) => columnsFor(params);
+
+/**
+ * "Attendance for …" / "Absentees for …", naming the day, the range or the month and its length.
+ * A single date has no Date column to read a weekday from, so the subtitle names it:
+ * "Attendance for 2026-10-05 (Monday)".
+ */
 export function periodSubtitle(params = {}, label = "Attendance") {
   if (params.mode === "month") {
     const bounds = monthBounds(params.month);
@@ -185,7 +199,10 @@ export function periodSubtitle(params = {}, label = "Attendance") {
       return `${label} for ${MONTH_NAMES[bounds.month - 1]} ${bounds.year} (${bounds.start} to ${bounds.end}, ${days} days)`;
     }
   }
-  if (!spansDays(params)) return `${label} for ${params.date ?? params.start ?? ""}`;
+  if (!spansDays(params)) {
+    const date = params.date ?? params.start ?? "";
+    return isIsoDate(date) ? `${label} for ${date} (${weekdayOf(date)})` : `${label} for ${date}`;
+  }
   const days = rangeDays(params.start, params.end);
   return `${label} from ${params.start} to ${params.end} (${days} day${days === 1 ? "" : "s"})`;
 }
@@ -309,8 +326,18 @@ export function daysInPeriod(start, end) {
   return days;
 }
 
+/**
+ * Weekday of a local calendar day, from the date text alone (`2026-10-05` -> "Monday"). The
+ * report's days are already local (`@tz` was applied in SQL), so no time zone is involved and the
+ * machine clock cannot move a row's weekday.
+ */
+const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const weekdayIndex = (ymd) => new Date(`${ymd}T00:00:00Z`).getUTCDay();
+
+export const weekdayOf = (ymd) => WEEKDAY_NAMES[weekdayIndex(ymd)];
+
 /** Saturday and Sunday, by calendar day (no time zone involved: the text is already local). */
-export const isWeekend = (ymd) => [0, 6].includes(new Date(`${ymd}T00:00:00Z`).getUTCDay());
+export const isWeekend = (ymd) => [0, 6].includes(weekdayIndex(ymd));
 
 /** The local "today" for the configured offset, so the cut-off matches the report's day boundaries. */
 export function localToday(now = new Date(), tzOffsetHours = 0) {
@@ -338,6 +365,7 @@ export function absentRows({ start, end, today, roster, presentKeys, skipWeekend
       if (presentKeys.has(`${person.key}|${date}`)) continue;
       rows.push({
         date,
+        day: weekdayOf(date),
         name: person.name,
         idNumber: person.idNumber,
         department: person.department,
@@ -364,9 +392,22 @@ const guard = async (fn) => {
   }
 };
 
+/**
+ * The order the report is read in, and the order its sections are cut in — `GROUP_BY` splits each
+ * department into a Present block and an Absent block, so this sorts by department, then status
+ * (Present first), then date, then name. Inside `… — Present` and inside `… — Absent` the days
+ * still run in order, so a reader sees a department's attendance history and its absence history
+ * as two clean runs rather than interleaved day by day.
+ */
+const STATUS_ORDER = { Present: 0, Absent: 1 };
+
+/** The grouping columns, in the order their sections are nested (see `group()` in export.js). */
+export const GROUP_BY = Object.freeze(["department", "status"]);
+
 const sortRows = (rows) => rows.sort((a, b) =>
-  a.date.localeCompare(b.date) ||
   a.department.localeCompare(b.department) ||
+  (STATUS_ORDER[a.status] ?? 1) - (STATUS_ORDER[b.status] ?? 1) ||
+  a.date.localeCompare(b.date) ||
   a.name.localeCompare(b.name));
 
 /**
@@ -384,8 +425,10 @@ export async function runPeriod(params, { tz, queryFn = query, now = new Date() 
 
   const present = swipes.map((r) => {
     const single = r.DurationMin === 0; // one swipe: no check-out to show
+    const date = r.LocalDate ?? start;
     return {
-      date: r.LocalDate ?? start,
+      date,
+      day: weekdayOf(date),
       name: nameOf(r),
       idNumber: r.PeopleID ?? "—",
       department: r.Department || "Unassigned",
@@ -428,7 +471,9 @@ export default {
   title: "Daily attendance",
   description: "Who swiped in on a day, date range or month, with first and last entry. Active employees with no swipe are listed as Absent.",
   params: periodParams,
-  groupBy: "department",
+  // Two levels: every department is split into "Front Desk — Present" and "Front Desk — Absent"
+  // sections, so the swipes and the absences of a department never have to be told apart by eye.
+  groupBy: GROUP_BY,
   columns: COLUMNS,
   columnsFor,
   exportColumnsFor,

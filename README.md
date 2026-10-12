@@ -86,11 +86,23 @@ Install the new build **over the existing installation**; no uninstall is needed
 
 The report form has a **Report for** choice:
 
-- **Single date** (default) — pick one day.
+- **Single date** (default) — pick one day. The subtitle names its weekday, for example `Attendance for 2026-10-05 (Monday)`.
 - **Date range** — pick a **Start date** and an **End date** (both included). Results get a leading **Date** column and one row per person per local calendar day, so the same person's days are never merged.
 - **Month** — pick a calendar month (`YYYY-MM`). It covers the first to the last day of that month, with the same Date column as a range.
 
-Every period shows the same columns: **Name**, **Employee ID**, **Status** (`Present` or `Absent`), **Card no.**, **First entry**, **Last entry**, **Duration** and **Swipes**, grouped by department. A period covering more than one day adds **Date** in front. Active employees who did not swipe on a day appear as `Absent` on that day (see **Absence** below), so the report lists everyone who should have been there, not only the people who swiped.
+Every period shows the same columns: **Day** (the weekday of the row's local date, for example `Monday`), **Name**, **Employee ID**, **Department**, **Status** (`Present` or `Absent`), **Card no.**, **First entry**, **Last entry**, **Duration** and **Swipes**, grouped by department. A period covering more than one day adds **Date** in front of **Day**. Active employees who did not swipe on a day appear as `Absent` on that day (see **Absence** below), so the report lists everyone who should have been there, not only the people who swiped.
+
+A department is cut into **two blocks**, so the swipes and the absences never have to be told apart by eye:
+
+```
+Front Desk — Present (128)
+   2026-08-01  Saturday   Obi Ada      …
+   2026-08-01  Saturday   Eze Chi      …
+Front Desk — Absent (41)
+   2026-08-02  Sunday     Obi Ada      …
+```
+
+Within each department, rows run **Present first, then Absent**, and **each of those blocks runs by date**, then by name. The order is decided once, by the server, and the screen, the Excel/CSV exports and the PDF all follow it. **Department** is a column of its own as well as the section heading, so a row still says where its person works when the table is read out of context or sorted in a spreadsheet. One trade-off worth knowing: the present and the absent rows of a single day now sit in two different blocks — use a **Single date** as the **Report for** choice, or the **Absentees** report, when you want one day's picture in one glance.
 
 **Employee ID** (optional) limits a run to one person. It matches `dbo.EventHistory.PeopleID` (and `dbo.p_people.PeopleID`) exactly; leave it blank for everyone. The field keeps its database meaning; only the label on screen, in exports and here changed.
 
@@ -98,13 +110,13 @@ Every period uses the same parameterized SQL, the same `TZ_OFFSET_HOURS` shift a
 
 ### Absentee report
 
-The **Absentees** report is a separate entry on the report list. It takes the same **Report for** choices (single date, date range or month), the same optional Employee ID filter and the same absence rule, but returns only the `Absent` rows: **Name**, **Employee ID** (plus **Date** for a range or month, and **Department** in exports). Because it shares the attendance report's code path, the two can never disagree about who is absent.
+The **Absentees** report is a separate entry on the report list. It takes the same **Report for** choices (single date, date range or month), the same optional Employee ID filter and the same absence rule, but returns only the `Absent` rows: **Name**, **Employee ID** and **Department**, with **Day** on every period and **Date** as well for a range or month. It keeps **one section per department** (`Front Desk (41)`) rather than the attendance report's Present/Absent split, since every row here is already Absent; the rows inside a section run by date and name. Because it shares the attendance report's code path — and its period columns — the two can never disagree about who is absent, or about which weekday a row falls on.
 
 ### Absence
 
 - **Who can be absent:** only people whose `dbo.p_people.IsActive` is `1`. `0` (inactive, or not yet employed) is never marked absent, and neither is a `NULL` or unreadable value, so an unknown status is never reported as an absence. There is no hire-date rule: a person who has not started yet must have `IsActive = 0` until they do.
 - **What counts as absent:** an eligible person with **no granted access swipe on that local day**. Denied or non-access events do not count as presence. Each person is reported once per day as either `Present` or `Absent`, never both.
-- **Ranges and months:** absence is per person per day, so a 31-day month can give one row per absent day. The grain is a deliberate choice that keeps partial absences visible.
+- **Ranges and months:** absence is per person per day, so a 31-day month can give one row per absent day (a large month runs to tens of thousands of rows in total). The grain is a deliberate choice that keeps partial absences visible, and across a month it is worth switching to the **Absentees** report, which shows only those rows, grouped per department.
 - **Weekends** count as absence days by default. To skip Saturdays and Sundays, set `ABSENCE_SKIP_WEEKENDS = true` in `server/reports/attendance.js`.
 - **Future days are never reported.** Days after today (local date, from `TZ_OFFSET_HOURS`) are left out, so they cannot appear as absent. **Today is included**, so today's absences are provisional until the day has ended: someone who has not swiped yet this morning shows as `Absent` until they do.
 - If the eligibility lookup fails, the report fails with an error. It never falls back to showing nobody as absent.
@@ -121,7 +133,7 @@ The toolbar's query string is the whole API contract, and both browser and Elect
 
 The absentee report uses the same parameters at `/api/reports/absentees/{data,xlsx,csv,pdf}`.
 
-The **Excel**, **CSV** and **PDF** buttons export whatever the form currently holds, so the filters always match the screen. Exports carry the same columns as the screen, with **Department** inserted straight after **Employee ID** so a filtered or sorted sheet still says who belongs to which department. They are named for the window they cover:
+The **Excel**, **CSV** and **PDF** buttons export whatever the form currently holds, so the filters always match the screen. Exports carry exactly the same columns, in the same order, as the screen — **Date**, **Day**, **Name**, **Employee ID**, **Department**, **Status** and the rest — so a sheet cannot drift from the table it was printed from. They are named for the window they cover:
 
 | Mode | Attendance (Excel, CSV, PDF) | Absentees |
 | --- | --- | --- |
@@ -139,7 +151,16 @@ Every report is one definition in `server/reports/`, rendered through a shared t
 - **Defaults** — a field's own `default` wins; date fields otherwise start on today, and `mode`-tagged fields are hidden and disabled until that mode is selected.
 - **Dynamic (extra) inputs** — any *other* key in the page URL is passed straight through to the report on every run and export. That is how a URL such as `?mode=range&start=2026-08-16&end=2026-08-19&plant=Lagos` presets the window *and* keeps `plant=Lagos` travelling to the API, so a report can pick up parameters it needs beyond the visible fields. Extra keys are bounded as SQL parameters like every other value; nothing from the URL is ever concatenated into a statement.
 
-**Presentation.** `groupBy` (default `department`) turns rows into sections with a heading and a count; `columns` — or `columnsFor(params)` for mode-dependent tables — are rendered in order, with `align: "right"` and `wrap: true` honoured by the screen, the CSV and the printable template. `exportColumnsFor(params)` lets exports carry a column the screen shows as a section heading instead (that is where Department comes from).
+**Presentation.** `groupBy` turns rows into sections with a heading and a count. It may be **one column** (`"department"`, as the absentee report uses) or **several** (`["department", "status"]`, as the attendance report uses), in which case every combination gets its own heading and they are nested in the order listed:
+
+```
+Front Desk — Present (128)
+Front Desk — Absent (41)
+```
+
+`columns` — or `columnsFor(params)` for mode-dependent tables — are rendered in order, with `align: "right"` and `wrap: true` honoured by the screen, the CSV and the printable template. The attendance and absentee reports use one list for both halves (`exportColumnsFor(params)` returns `columnsFor(params)`); a report that needs a printed column the table *hides* can still return a different list from `exportColumnsFor(params)`. The grouping is applied by the same code everywhere — `group()` in `server/reports/export.js` for every export, the printable template and PDFKit, and `sectionsOf()` in `renderer/app/js/template.js` for the screen — so a heading can never say one thing on screen and another in the PDF.
+
+**Ordering.** A report returns its rows in the order they are shown and exported; the page never re-sorts them. The attendance report orders by department, then `Present` before `Absent`, then date, then name — which is exactly the order its sections are cut in.
 
 **API.** `GET /api/reports/<id>/data` returns `{ rows, subtitle, columns }`, `GET /api/reports/<id>/{xlsx,csv,pdf}` return the files. Both share one validated run, so the screen and the exports can never disagree.
 
@@ -150,6 +171,20 @@ Every report is one definition in `server/reports/`, rendered through a shared t
 - Electron renders `toHtml(...)` through Chromium's `printToPDF` with `printOptions(...)` from that module, so the footer and margins come from the template rather than from defaults.
 - The standalone server draws the same table with PDFKit (`server/reports/pdf.js`), with the same columns, group headings and subtitle.
 - `toHtml(...)` carries the same page setup as a CSS `@page` rule, so printing the HTML by hand looks the same too.
+
+### Why a big report is printed from a file
+
+Electron used to hand the report to Chromium as a `data:text/html;charset=utf-8,…` URL. Chromium caps URLs at about **2 MB**, and a report is bigger than that well before a month is up: at roughly **5,000 rows** the encoded URL is already over 2 MB, and August 2026 with absentees (**18,517 rows**) encodes to about **8.6 MB**. Chromium then refuses to navigate with `ERR_INVALID_URL (-300)` and the PDF button fails without printing a page.
+
+`main/print-report.js` now writes the same HTML into a temporary file (its own `reports-desk-print-*` folder under Electron's temp directory) and loads it with `loadFile`, so a report's size is no longer part of a URL. The folder is deleted as soon as the PDF has been rendered, and on the failure path too, so a failed print leaves nothing behind. Page setup and footer are still `printOptions(...)` from the template. The module takes `loadFile` and `printToPDF` as arguments, which is what lets `npm test` cover the whole path — including an 18,517-row report — without Electron, a browser or a database.
+
+**Manual check** (the Electron runtime is not part of the test suite, so the desktop half is verified by hand on a machine that can run `npm start`):
+
+1. Start the desktop app against a database you can print from, and run a period big enough to have failed before — a **Month** with absentees, or a date range of a few thousand rows.
+2. Press **PDF**. The save dialog opens and the file is written; no error dialog, and nothing about `ERR_INVALID_URL` or `-300` in the log.
+3. Open the PDF: every row is there (the total in the header matches the `Total` line on screen), the footer shows the report title, its window, the brand and *Page x of y*, and the pages are A4 landscape.
+4. Repeat with a single date, to confirm the small reports still print.
+5. Confirm no `reports-desk-print-*` folder is left in the temp directory (`%TEMP%` on Windows, `$TMPDIR` elsewhere) after printing, and none after deliberately failing a print (for example by cancelling the save dialog).
 
 ## Local environment variables
 
@@ -169,7 +204,7 @@ The attendance report (`server/reports/attendance.js`) expects:
 - `dbo.EventHistory`: `PeopleID`, `CardNumber`, `EventCategory`, `EventDescription`, `EventUTCTime`
 - `dbo.p_people`: `PeopleID`, `Firstname`, `Lastname`, `Department`, `IsActive` (1 = active; only active people can be absent)
 
-It filters for granted access events and groups results by person **and local calendar day**. Absences come from a second, read-only query over the active roster (`TRY_CONVERT(int, pp.IsActive) = 1`), compared with the swipes in application code; see **Absence** above. Event times are stored in UTC and shifted by `TZ_OFFSET_HOURS`; the queried UTC window runs from local midnight of the first selected day to local midnight after the last one. In range and month mode each row also carries its local date for the UI and the exports. The optional Employee ID filter compares `PeopleID` as text, so it works whether that column is numeric or a GUID.
+It filters for granted access events and groups results by person **and local calendar day**. Absences come from a second, read-only query over the active roster (`TRY_CONVERT(int, pp.IsActive) = 1`), compared with the swipes in application code; see **Absence** above. Event times are stored in UTC and shifted by `TZ_OFFSET_HOURS`; the queried UTC window runs from local midnight of the first selected day to local midnight after the last one. Every row carries its local date and that date's weekday for the UI and the exports; the weekday is read from the calendar date alone, so the machine's clock and time zone cannot move it. The optional Employee ID filter compares `PeopleID` as text, so it works whether that column is numeric or a GUID.
 
 `EventUTCTime` may be a real date/time column (`date`, `datetime`, `smalldatetime`, `datetime2`) or a legacy character column. The report reads its declared type from the catalog once per run and uses the matching statement: the plain column for time-bearing date/time types, so the index on it stays usable, or `TRY_CONVERT(datetime2(3), eh.EventUTCTime)`, which skips rows whose text cannot be parsed instead of failing the whole report. A date-only column also uses the datetime2-safe path so hour shifts are legal, but it contains no time-of-day: every stored entry time is midnight, so the report shows duration and last-entry fields as `—`. An unknown or unreadable type falls back to the text-safe statement.
 
@@ -191,4 +226,4 @@ It sends nothing but `SELECT`s, looks up only the columns listed under **Databas
 npm test
 ```
 
-Covers the shared connection-string configuration (`server/config.js`, `server/env.js`), the attendance report's validation (single date, range and month, inclusive boundaries, leap years, the 366-day cap), the integer window and statement selection (including the text-safe and date-only paths), the Employee ID labels, the Department and Status columns and their alignment in every export, absence (active roster only, one row per person per day, the future-day cut-off and the weekend setting), the absentee-only report, the Excel/CSV/HTML/PDF exports and the print template, the renderer's report template (URL presets, month fields, file names), the doctor's checks, its identifier allowlist and 241/242/9810 hint path, the installer configuration that keeps settings across an upgrade, plus the Express API's 400/401/403/404 behaviour. Nothing needs a database: every SQL call goes through an injected query function. No external services are needed: every test runs against an injected query function, so a plain `npm install` is enough.
+Covers the shared connection-string configuration (`server/config.js`, `server/env.js`), the attendance report's validation (single date, range and month, inclusive boundaries, leap years, the 366-day cap), the integer window and statement selection (including the text-safe and date-only paths), the Employee ID labels, the Date/Day/Department/Status columns and their alignment in every export, the weekday of every row and of a single-date subtitle, the row order (department, Present before Absent, date, name), the section headings on screen, in the printable template and inside the PDFKit PDF (its text is decoded from the page's own content streams), the grouping rule for one column and for several, absence (active roster only, one row per person per day, the future-day cut-off and the weekend setting), the absentee-only report, the Excel/CSV/HTML/PDF exports and the print template, the desktop PDF path (an 18,517-row report is printed from a temporary file, never a `data:` URL, and the file is deleted afterwards), the renderer's report template (URL presets, month fields, file names), the doctor's checks, its identifier allowlist and 241/242/9810 hint path, the installer configuration that keeps settings across an upgrade, plus the Express API's 400/401/403/404 behaviour. Nothing needs a database: every SQL call goes through an injected query function, and the print path takes its Chromium halves injected as well, so a plain `npm install` is enough. The Electron runtime is not downloaded by `npm install --ignore-scripts` and is not needed to run the suite; see **Manual check** for the one step that needs it.

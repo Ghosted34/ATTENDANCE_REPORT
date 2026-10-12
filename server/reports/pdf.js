@@ -21,6 +21,7 @@ function pdfText(value) {
 function columnWidths(columns, width) {
   const weights = columns.map((column) => {
     if (column.key === "date") return 0.95;
+    if (column.key === "day") return 0.85;
     if (column.key === "name") return 1.65;
     if (column.key === "department") return 1.35;
     if (column.key === "idNumber") return 1.1;

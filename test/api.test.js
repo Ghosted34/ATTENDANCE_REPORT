@@ -41,12 +41,16 @@ test("the report list advertises the mode select, a single-date default and mode
     assert.equal(params.month.mode, "month");
     assert.equal(params.idNumber.type, "text");
     assert.equal(params.idNumber.optional, true); // blank means everyone
+    // The mode-independent base list: a run's Date and every period's Day come from columnsFor(params).
     assert.equal(report.columns.some((c) => c.key === "date"), false);
-    assert.equal(report.columns.some((c) => c.key === "department"), false); // the screen groups by it instead
+    assert.equal(report.columns.some((c) => c.key === "day"), false);
+    assert.equal(report.columns.some((c) => c.key === "department"), true); // on screen, not only in the export
     assert.deepEqual(report.columns.map((c) => c.label), [
-      "Name", "Employee ID", "Status", "Card no.", "First entry", "Last entry", "Duration", "Swipes",
+      "Name", "Employee ID", "Department", "Status", "Card no.", "First entry", "Last entry", "Duration", "Swipes",
     ]);
     assert.match(report.description, /Absent/);
+    // Sections are cut twice: a department's Present rows and its Absent rows are separate blocks.
+    assert.deepEqual(report.groupBy, ["department", "status"]);
   });
 });
 
@@ -185,7 +189,7 @@ test("the absentee report is listed beside attendance, with its own name, column
     assert.ok(absentees, "absentee report is registered");
     assert.equal(absentees.title, "Absentees");
     assert.deepEqual(absentees.params.map((p) => p.name), ["mode", "date", "start", "end", "month", "idNumber"]);
-    assert.deepEqual(absentees.columns.map((c) => c.label), ["Name", "Employee ID"]);
+    assert.deepEqual(absentees.columns.map((c) => c.label), ["Name", "Employee ID", "Department"]);
     assert.equal(absentees.groupBy, "department");
     // Same period validation as the attendance report, so the two reports take the same inputs.
     const res = await get("/api/reports/absentees/xlsx?mode=range&start=2026-10-05&end=2026-10-01");
