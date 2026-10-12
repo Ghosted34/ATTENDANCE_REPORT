@@ -6,11 +6,14 @@ import { normalizeParams, periodColumnsFor, periodParams, periodSubtitle, runPer
  * anything itself, so the two reports can never disagree about who is absent.
  */
 
-// Absent rows have no swipe, so no card, entry or duration columns: who the person is, where they
-// work, and — through the shared period columns — the date and its weekday.
+// Absent rows have no swipe, so no entry, duration, swipes or status columns: who the person is,
+// where they work, the card on file for them, and — through the shared period columns — the date
+// and its weekday. The card is the day's card when the day has a swipe, or the person's latest
+// granted card otherwise; "—" only when the person has neither.
 const COLUMNS = [
   { key: "name", label: "Name", minWidth: 150 },
   { key: "idNumber", label: "Employee ID", minWidth: 80 },
+  { key: "cardNumber", label: "Card no.", minWidth: 80 },
   { key: "department", label: "Department", minWidth: 120 },
 ];
 
