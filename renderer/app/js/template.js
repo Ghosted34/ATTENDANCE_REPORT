@@ -9,8 +9,8 @@
  *   - Fixed inputs: the fields a report declares with `type` "date" | "text" | "number",
  *     or an `options` list. Every field is rendered every time; the ones whose `mode` does
  *     not match are hidden and disabled, so they never reach the request.
- *   - Defaults: a field's own `default` (for example today for date fields) is used until
- *     the URL or the user says otherwise.
+ *   - Defaults: a field's own `default` (for example today for date fields, or the current
+ *     month for month fields) is used until the URL or the user says otherwise.
  *   - Dynamic (extra) inputs: any *other* key in the page URL is passed straight through
  *     to the report on every run and export. Paste the window a report needs, such as
  *     `?mode=range&start=2026-08-16&end=2026-08-19`, and the fields are preset while the
@@ -63,7 +63,7 @@ export function resolveReportParams(report, { query = parseQuery(location.search
   const declared = new Set(fields.map((p) => p.name));
   const values = {};
   for (const field of fields) {
-    const fallback = field.default ?? (field.type === "date" ? today : "");
+    const fallback = field.default ?? (field.type === "date" ? today : field.type === "month" ? today.slice(0, 7) : "");
     values[field.name] = query.has(field.name) ? query.get(field.name) : fallback;
   }
   const extra = [];
@@ -84,7 +84,7 @@ export function paramFieldsHtml(report, values = {}) {
         `${escapeHtml(option.label)}</option>`).join("");
       return `<div class="field"${scope}>${label}<select id="${id}" name="${escapeHtml(p.name)}">${options}</select>${hint}</div>`;
     }
-    const type = ["date", "number"].includes(p.type) ? p.type : "text";
+    const type = ["date", "month", "number"].includes(p.type) ? p.type : "text";
     const required = p.optional ? "" : " required";
     const placeholder = p.placeholder ? ` placeholder="${escapeHtml(p.placeholder)}"` : "";
     return `<div class="field"${scope}>${label}` +
@@ -126,8 +126,12 @@ export function csvFor({ columns, rows }) {
   ].join("\r\n") + "\r\n";
 }
 
-/** Download name: the report id plus its window, e.g. attendance-2026-08-16_to_2026-08-19. */
+/**
+ * Download name: the report id plus its window, e.g. attendance-2026-08-16_to_2026-08-19 for a
+ * range or attendance-2026-08 for a month.
+ */
 export function exportFileName(reportId, values, ext) {
+  if ((values.mode || "single") === "month") return `${reportId}-${values.month || "month"}.${ext}`;
   if ((values.mode || "single") === "range") return `${reportId}-${values.start || "range"}_to_${values.end || "range"}.${ext}`;
   return `${reportId}-${values.date || "report"}.${ext}`;
 }

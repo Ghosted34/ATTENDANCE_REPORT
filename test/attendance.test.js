@@ -1,8 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import ExcelJS from "exceljs";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import attendance, {
-  columnsFor, exportColumnsFor, isIsoDate, normalizeParams, rangeDays, readEventTimeType, statementFor, subtitle, TEXT_SAFE_STATEMENT,
+  ABSENCE_SKIP_WEEKENDS, absentRows, columnsFor, daysInPeriod, exportColumnsFor, isIsoDate, isWeekend, localToday,
+  MAX_PERIOD_DAYS, monthBounds, normalizeParams, periodParams, rangeDays, readEventTimeType, ROSTER_SQL, runPeriod,
+  statementFor, subtitle, TEXT_SAFE_STATEMENT,
 } from "../server/reports/attendance.js";
 import { classifyColumn, isDateShapeError, isError241 } from "../server/doctor.js";
 import { columnsOf, toCsv, toHtml, toXlsx } from "../server/reports/export.js";
@@ -18,14 +23,31 @@ const dbRows = [
     CardNumber: 9876, FirstEntry: "06:30:00", LastEntry: "18:00:00", DurationMin: 690, AccessCount: 4 },
 ];
 
+// Active employees (IsActive = 1 in the roster query). Ada and Ben swiped in the range above; Chi
+// never did, so Chi is the person the report must list as Absent on every day.
+const roster = [
+  { PeopleID: 7, Firstname: "Ada", Lastname: "Obi", Department: "Ops" },
+  { PeopleID: 9, Firstname: "Ben", Lastname: "Nwosu", Department: "Security" },
+  { PeopleID: 11, Firstname: "Chi", Lastname: "Eze", Department: "Ops" },
+];
+
+// A fixed "now" (12 Oct 2026 09:00 UTC, i.e. 10:00 in Lagos) so the future-day cut-off is stable.
+const NOW = new Date("2026-10-12T09:00:00Z");
+
+// The swipe rows that fall inside the requested window, as the SQL's window predicate would return.
+const swipesIn = (params = {}) => dbRows.filter((r) => {
+  const ymd = Number(r.LocalDate.replace(/-/g, ""));
+  return params.startYmd === undefined || (ymd >= params.startYmd && ymd <= params.endYmd);
+});
+
 // The rows the report hands to the UI and the exports.
 const reportRows = [
   { date: "2026-10-05", name: "Obi Ada", idNumber: 7, department: "Ops", cardNumber: 1234,
-    firstEntry: "08:01:02", lastEntry: "17:12:00", duration: "9h 11m", accessCount: 2 },
+    firstEntry: "08:01:02", lastEntry: "17:12:00", duration: "9h 11m", accessCount: 2, status: "Present" },
   { date: "2026-10-06", name: "Obi Ada", idNumber: 7, department: "Ops", cardNumber: 1234,
-    firstEntry: "07:58:41", lastEntry: "—", duration: "—", accessCount: 1 },
+    firstEntry: "07:58:41", lastEntry: "—", duration: "—", accessCount: 1, status: "Present" },
   { date: "2026-10-06", name: "Nwosu Ben", idNumber: 9, department: "Security", cardNumber: 9876,
-    firstEntry: "06:30:00", lastEntry: "18:00:00", duration: "11h 30m", accessCount: 4 },
+    firstEntry: "06:30:00", lastEntry: "18:00:00", duration: "11h 30m", accessCount: 4, status: "Present" },
 ];
 
 // The datetime column a modern installation has: the probe answers, the report returns rows.
@@ -33,7 +55,8 @@ const fakeQuery = () => {
   const calls = [];
   const queryFn = async (sql, params) => {
     calls.push({ sql, params });
-    return /INFORMATION_SCHEMA\.COLUMNS/.test(sql) ? [{ kind: "datetime" }] : dbRows;
+    if (/IsActive/.test(sql)) return roster;
+    return /INFORMATION_SCHEMA\.COLUMNS/.test(sql) ? [{ kind: "datetime" }] : swipesIn(params);
   };
   return { calls, queryFn };
 };
@@ -150,8 +173,8 @@ test("invalid dates, unknown modes, reversed ranges and bad ID numbers are rejec
   bad({ mode: "range", start: "2026-10-05", end: "2026-10-05x" }, /valid start date and end date/);
   bad({ mode: "range", start: "2026-10-05" }, /valid start date and end date/);
   bad({ mode: "daily", date: "2026-10-05" }, /Single date/);
-  bad({ date: "2026-10-05", idNumber: "7 OR 1=1" }, /ID number can only contain/);
-  bad({ date: "2026-10-05", idNumber: "a".repeat(65) }, /ID number can only contain/);
+  bad({ date: "2026-10-05", idNumber: "7 OR 1=1" }, /Employee ID can only contain/);
+  bad({ date: "2026-10-05", idNumber: "a".repeat(65) }, /Employee ID can only contain/);
 });
 
 test("rangeDays counts both ends", () => {
@@ -162,34 +185,50 @@ test("rangeDays counts both ends", () => {
 
 /* ---------- Columns and subtitle ---------- */
 
-test("the screen table is Name, ID number, … and range mode adds Date", () => {
+test("the screen table is Name, Employee ID, Status, … and a period longer than one day adds Date", () => {
   assert.deepEqual(columnsFor({ mode: "single", date: "2026-10-05" }).map((c) => c.key), [
-    "name", "idNumber", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
+    "name", "idNumber", "status", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
   ]);
   assert.deepEqual(columnsFor({ mode: "range", start: "2026-10-05", end: "2026-10-07" }).map((c) => c.key), [
-    "date", "name", "idNumber", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
+    "date", "name", "idNumber", "status", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
   ]);
-  assert.equal(columnsFor({})[1].label, "ID number"); // the old "People ID" label is gone
+  assert.deepEqual(columnsFor({ mode: "month", month: "2026-10" }).map((c) => c.key), [
+    "date", "name", "idNumber", "status", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
+  ]);
+  assert.equal(columnsFor({})[1].label, "Employee ID");
   assert.equal(attendance.columns.some((c) => c.key === "peopleId"), false);
-  assert.equal(attendance.columns.length, 7); // legacy shape keeps the single-date columns
+  assert.equal(attendance.columns.length, 8); // legacy shape keeps the single-date columns
 });
 
-test("exported columns add Department after the ID number", () => {
+test("exported columns are the screen columns with Department straight after the Employee ID", () => {
+  for (const params of [
+    { mode: "single", date: "2026-10-05" },
+    { mode: "range", start: "2026-10-05", end: "2026-10-07" },
+    { mode: "month", month: "2026-10" },
+  ]) {
+    const screen = columnsFor(params).map((c) => c.key);
+    const exported = exportColumnsFor(params).map((c) => c.key);
+    // Nothing moves except the inserted department, so the sheet lines up with the screen.
+    assert.deepEqual(exported.filter((k) => k !== "department"), screen, params.mode);
+    assert.equal(exported[exported.indexOf("idNumber") + 1], "department", params.mode);
+  }
   assert.deepEqual(exportColumnsFor({ mode: "single", date: "2026-10-05" }).map((c) => c.key), [
-    "name", "idNumber", "department", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
+    "name", "idNumber", "department", "status", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
   ]);
-  assert.deepEqual(columnsOf(attendance, { mode: "range", start: "2026-10-05", end: "2026-10-07" }).map((c) => c.key), [
-    "date", "name", "idNumber", "department", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
+  assert.deepEqual(exportColumnsFor({ mode: "range", start: "2026-10-05", end: "2026-10-07" }).map((c) => c.key), [
+    "date", "name", "idNumber", "department", "status", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
   ]);
 });
 
-test("subtitle names the day or the range and its length", () => {
+test("subtitle names the day, the range or the month, and its length", () => {
   assert.equal(subtitle({ mode: "single", date: "2026-10-05" }), "Attendance for 2026-10-05");
   assert.equal(subtitle({ date: "2026-10-05" }), "Attendance for 2026-10-05");
   assert.equal(subtitle({ mode: "range", start: "2026-10-05", end: "2026-10-07" }),
     "Attendance from 2026-10-05 to 2026-10-07 (3 days)");
   assert.equal(subtitle({ mode: "range", start: "2026-10-05", end: "2026-10-05" }),
     "Attendance from 2026-10-05 to 2026-10-05 (1 day)");
+  assert.equal(subtitle({ mode: "month", month: "2026-02" }),
+    "Attendance for February 2026 (2026-02-01 to 2026-02-28, 28 days)");
 });
 
 /* ---------- Query ---------- */
@@ -198,7 +237,7 @@ test("SQL is parameterized and the window is bound as integers, so no date is ev
   const { calls, queryFn } = fakeQuery();
   await attendance.run({ mode: "range", start: "2026-10-05", end: "2026-10-07" }, { tz: 1, queryFn });
 
-  assert.equal(calls.length, 2); // the column type first, then the report itself
+  assert.equal(calls.length, 3); // the column type first, then the swipes, then the roster
   const { sql } = calls[1];
   assert.match(sql, /@startYmd/);
   assert.match(sql, /@endYmd/);
@@ -285,9 +324,10 @@ const runWithColumnType = async (type) => {
       if (type === "boom") throw new Error("permission denied on INFORMATION_SCHEMA.COLUMNS");
       return type === null ? [] : [{ kind: type }];
     }
-    return dbRows;
+    if (/IsActive/.test(sql)) return roster;
+    return swipesIn(params);
   };
-  await attendance.run({ date: "2026-10-05" }, { tz: 1, queryFn });
+  await attendance.run({ date: "2026-10-05" }, { tz: 1, queryFn, now: NOW });
   return calls;
 };
 
@@ -360,21 +400,231 @@ test("SQL date-shape errors 241, 242 and 9810 get the doctor hint without losing
   assert.equal(isError241(timeout), false);
 });
 
-test("rows keep one entry per person per local day and carry the date and department", async () => {
+test("swipe rows keep one entry per person per local day and carry the date and department", async () => {
   const { queryFn } = fakeQuery();
-  const out = await attendance.run({ mode: "range", start: "2026-10-05", end: "2026-10-07" }, { tz: 1, queryFn });
+  const out = await attendance.run({ mode: "range", start: "2026-10-05", end: "2026-10-07" }, { tz: 1, queryFn, now: NOW });
+  const present = out.filter((r) => r.status === "Present");
 
-  assert.deepEqual(out.map((r) => [r.date, r.name]), [
+  assert.deepEqual(present.map((r) => [r.date, r.name]), [
     ["2026-10-05", "Obi Ada"],
     ["2026-10-06", "Obi Ada"],
     ["2026-10-06", "Nwosu Ben"],
   ]);
-  assert.equal(out[0].duration, "9h 11m");
-  assert.equal(out[1].duration, "—"); // single swipe on the second day
-  assert.equal(out[1].lastEntry, "—");
-  assert.equal(out[2].accessCount, 4);
-  assert.equal(out[2].department, "Security");
-  assert.equal(out[2].idNumber, 9);
+  assert.equal(present[0].duration, "9h 11m");
+  assert.equal(present[1].duration, "—"); // single swipe on the second day
+  assert.equal(present[1].lastEntry, "—");
+  assert.equal(present[2].accessCount, 4);
+  assert.equal(present[2].department, "Security");
+  assert.equal(present[2].idNumber, 9);
+});
+
+test("eligible employees with no swipe are listed as Absent on every day of the period", async () => {
+  const { queryFn } = fakeQuery();
+  const out = await attendance.run({ mode: "range", start: "2026-10-05", end: "2026-10-07" }, { tz: 1, queryFn, now: NOW });
+
+  // Chi never swiped: one Absent row per day, with the absence shown in the swipe columns too.
+  const chi = out.filter((r) => r.idNumber === 11);
+  assert.deepEqual(chi.map((r) => r.date), ["2026-10-05", "2026-10-06", "2026-10-07"]);
+  for (const row of chi) {
+    assert.equal(row.status, "Absent");
+    assert.equal(row.name, "Eze Chi");
+    assert.equal(row.department, "Ops");
+    assert.equal(row.accessCount, 0);
+    assert.equal(row.cardNumber, "—");
+    assert.equal(row.firstEntry, "—");
+  }
+  // Ada swiped on the 5th and 6th, so only the 7th is absent; Ben swiped on the 6th only.
+  assert.deepEqual(out.filter((r) => r.idNumber === 7).map((r) => [r.date, r.status]), [
+    ["2026-10-05", "Present"], ["2026-10-06", "Present"], ["2026-10-07", "Absent"],
+  ]);
+  assert.deepEqual(out.filter((r) => r.idNumber === 9).map((r) => [r.date, r.status]), [
+    ["2026-10-05", "Absent"], ["2026-10-06", "Present"], ["2026-10-07", "Absent"],
+  ]);
+  // One row per person per day: never both Present and Absent for the same day.
+  const keys = out.map((r) => `${r.idNumber}|${r.date}`);
+  assert.equal(new Set(keys).size, keys.length);
+});
+
+test("the roster is the active employees only, by the IsActive flag, and is bound by the same ID filter", () => {
+  // IsActive = 1 is the only value that counts; inactive, not-yet-employed or unknown (NULL,
+  // unreadable text) people are never marked absent.
+  assert.match(ROSTER_SQL, /TRY_CONVERT\(int, pp\.IsActive\) = 1/);
+  assert.match(ROSTER_SQL, /FROM dbo\.p_people AS pp/);
+  assert.doesNotMatch(ROSTER_SQL, /IsActive\s*(!=|<>|IS NULL)/);
+  assert.match(ROSTER_SQL, /@idNumber = '' OR LTRIM\(RTRIM\(CONVERT\(VARCHAR\(64\), pp\.PeopleID\)\)\) = @idNumber/);
+  assert.doesNotMatch(ROSTER_SQL, /\d{4}-\d{2}/); // no value is interpolated into the statement
+});
+
+test("a person listed twice in the roster is reported once per day", async () => {
+  const doubled = [...roster, { PeopleID: 11, Firstname: "Chi", Lastname: "Eze", Department: "Ops" }];
+  const queryFn = async (sql) => {
+    if (/INFORMATION_SCHEMA/.test(sql)) return [{ kind: "datetime" }];
+    if (/IsActive/.test(sql)) return doubled;
+    return [];
+  };
+  const out = await attendance.run({ date: "2026-10-05" }, { tz: 1, queryFn, now: NOW });
+  assert.equal(out.filter((r) => r.idNumber === 11).length, 1);
+});
+
+test("a future day is never reported absent, for a single date, a range or a month", async () => {
+  const empty = async (sql) => (/INFORMATION_SCHEMA/.test(sql) ? [{ kind: "datetime" }] : /IsActive/.test(sql) ? roster : []);
+  // Today is 12 Oct (local). Nothing after today may appear.
+  const month = await attendance.run({ mode: "month", month: "2026-10" }, { tz: 1, queryFn: empty, now: NOW });
+  assert.equal(month.at(-1).date, "2026-10-12");
+  assert.equal(month.filter((r) => r.date > "2026-10-12").length, 0);
+
+  const future = await attendance.run({ date: "2026-10-20" }, { tz: 1, queryFn: empty, now: NOW });
+  assert.deepEqual(future, []); // a day that has not happened yet has neither swipes nor absences
+
+  const today = await attendance.run({ date: "2026-10-12" }, { tz: 1, queryFn: empty, now: NOW });
+  assert.equal(today.length, roster.length); // today is reported, so today's absences are visible
+});
+
+test("a single date lists every eligible employee who did not swipe that day", async () => {
+  const { queryFn } = fakeQuery();
+  const out = await attendance.run({ date: "2026-10-06" }, { tz: 1, queryFn, now: NOW });
+  assert.deepEqual(out.map((r) => [r.name, r.status]).sort(), [
+    ["Eze Chi", "Absent"], ["Nwosu Ben", "Present"], ["Obi Ada", "Present"],
+  ].sort());
+  assert.equal(out.length, 3);
+});
+
+test("with no eligible employees and no swipes the report is empty, not an error", async () => {
+  const queryFn = async (sql) => (/INFORMATION_SCHEMA/.test(sql) ? [{ kind: "datetime" }] : []);
+  assert.deepEqual(await attendance.run({ date: "2026-10-05" }, { tz: 1, queryFn, now: NOW }), []);
+});
+
+test("absentRows needs no database and respects the cut-off and the weekend setting", () => {
+  const people = [{ key: "7", name: "Obi Ada", idNumber: 7, department: "Ops" }];
+  const none = new Set();
+  // 10 and 11 Oct 2026 are a Saturday and a Sunday; 12 Oct is today.
+  const week = absentRows({ start: "2026-10-09", end: "2026-10-13", today: "2026-10-12", roster: people, presentKeys: none });
+  assert.deepEqual(week.map((r) => r.date), ["2026-10-09", "2026-10-10", "2026-10-11", "2026-10-12"]);
+  assert.equal(week.every((r) => r.status === "Absent"), true);
+
+  const weekdays = absentRows({
+    start: "2026-10-09", end: "2026-10-13", today: "2026-10-12", roster: people, presentKeys: none, skipWeekends: true,
+  });
+  assert.deepEqual(weekdays.map((r) => r.date), ["2026-10-09", "2026-10-12"]);
+
+  const present = absentRows({
+    start: "2026-10-09", end: "2026-10-09", today: "2026-10-12", roster: people, presentKeys: new Set(["7|2026-10-09"]),
+  });
+  assert.deepEqual(present, []);
+  assert.equal(ABSENCE_SKIP_WEEKENDS, false); // the default counts every calendar day
+});
+
+test("runPeriod returns the swipes and the absences as separate lists", async () => {
+  const { queryFn } = fakeQuery();
+  const { present, absent } = await runPeriod({ date: "2026-10-05" }, { tz: 1, queryFn, now: NOW });
+  assert.deepEqual(present.map((r) => r.name), ["Obi Ada"]);
+  assert.deepEqual(absent.map((r) => r.name), ["Eze Chi", "Nwosu Ben"]); // sorted by department, then name
+});
+
+test("a failing roster lookup is an error, never a silently empty absence list", async () => {
+  const queryFn = async (sql) => {
+    if (/INFORMATION_SCHEMA/.test(sql)) return [{ kind: "datetime" }];
+    if (/IsActive/.test(sql)) throw Object.assign(new Error("Invalid object name 'dbo.p_people'."), { number: 208 });
+    return dbRows;
+  };
+  await assert.rejects(attendance.run({ date: "2026-10-05" }, { tz: 1, queryFn, now: NOW }), /Invalid object name/);
+});
+
+/* ---------- Periods: month, date boundaries and the range cap ---------- */
+
+test("month periods run from the first to the last day of the calendar month", () => {
+  assert.deepEqual(monthBounds("2026-02"), { year: 2026, month: 2, start: "2026-02-01", end: "2026-02-28" });
+  assert.equal(monthBounds("2028-02").end, "2028-02-29"); // leap year
+  assert.equal(monthBounds("2026-12").end, "2026-12-31");
+  assert.equal(monthBounds("2026-04").end, "2026-04-30");
+  assert.equal(monthBounds("1900-02").end, "1900-02-28"); // not a leap year
+  assert.equal(monthBounds("2000-02").end, "2000-02-29"); // a leap century
+  assert.equal(monthBounds("2026-13"), null);
+  assert.equal(monthBounds("2026-00"), null);
+  assert.equal(monthBounds("2026-1"), null);
+  assert.equal(monthBounds("2026-10-01"), null);
+  assert.equal(monthBounds("1899-12"), null);
+  assert.equal(monthBounds(""), null);
+  assert.equal(monthBounds(undefined), null);
+});
+
+test("a month is normalized to the same inclusive window the other periods use", () => {
+  assert.deepEqual(normalizeParams({ mode: "month", month: "2026-10" }), {
+    mode: "month", month: "2026-10", start: "2026-10-01", end: "2026-10-31", idNumber: "",
+  });
+  assert.deepEqual(normalizeParams({ mode: "month", month: "2028-02", idNumber: "7" }), {
+    mode: "month", month: "2028-02", start: "2028-02-01", end: "2028-02-29", idNumber: "7",
+  });
+  for (const bad of ["2026-13", "2026-1", "2026-10-01", "", undefined]) {
+    assert.throws(() => normalizeParams({ mode: "month", month: bad }),
+      (e) => e.status === 400 && /valid month/.test(e.message), String(bad));
+  }
+});
+
+test("a month's window is bound as integers (first and last day) through the normal SQL", async () => {
+  const { calls, queryFn } = fakeQuery();
+  await attendance.run({ mode: "month", month: "2028-02" }, { tz: 1, queryFn, now: new Date("2029-01-01T00:00:00Z") });
+  assert.deepEqual(calls[1].params, { startYmd: 20280201, endYmd: 20280229, idNumber: "", tz: 1 });
+});
+
+test("date boundaries: the first and last day are both included, the day after is not", () => {
+  assert.deepEqual(daysInPeriod("2026-10-31", "2026-11-01"), ["2026-10-31", "2026-11-01"]);
+  assert.deepEqual(daysInPeriod("2026-12-31", "2027-01-01"), ["2026-12-31", "2027-01-01"]);
+  assert.deepEqual(daysInPeriod("2026-10-05", "2026-10-05"), ["2026-10-05"]);
+  assert.deepEqual(daysInPeriod("2026-10-06", "2026-10-05"), []);
+  assert.equal(daysInPeriod("2028-02-01", "2028-02-29").length, 29);
+  const leap = absentRows({
+    start: "2028-02-28", end: "2028-03-01", today: "2030-01-01",
+    roster: [{ key: "1", name: "A", idNumber: 1, department: "x" }], presentKeys: new Set(),
+  });
+  assert.deepEqual(leap.map((r) => r.date), ["2028-02-28", "2028-02-29", "2028-03-01"]);
+});
+
+test("the local day for the cut-off follows the configured offset, not the machine clock", () => {
+  // 23:30 UTC on the 4th is already the 5th in Lagos (UTC+1).
+  assert.equal(localToday(new Date("2026-10-04T23:30:00Z"), 1), "2026-10-05");
+  assert.equal(localToday(new Date("2026-10-04T23:30:00Z"), 0), "2026-10-04");
+  assert.equal(localToday(new Date("2026-10-04T23:30:00Z"), -5), "2026-10-04");
+});
+
+test("weekends are worked out from the calendar date alone", () => {
+  assert.equal(isWeekend("2026-10-10"), true); // Saturday
+  assert.equal(isWeekend("2026-10-11"), true); // Sunday
+  assert.equal(isWeekend("2026-10-12"), false); // Monday
+});
+
+test("a range longer than the cap is refused before SQL runs", async () => {
+  assert.equal(MAX_PERIOD_DAYS, 366);
+  assert.equal(normalizeParams({ mode: "range", start: "2026-01-01", end: "2026-12-31" }).end, "2026-12-31"); // 365 days
+  const { calls, queryFn } = fakeQuery();
+  await assert.rejects(
+    attendance.run({ mode: "range", start: "2025-01-01", end: "2026-12-31" }, { tz: 1, queryFn }),
+    (e) => e.status === 400 && /at most 366 days/.test(e.message),
+  );
+  assert.equal(calls.length, 0);
+});
+
+test("the form offers single date, date range and month, with a month input for the month", () => {
+  const modes = periodParams.find((p) => p.name === "mode");
+  assert.deepEqual(modes.options.map((o) => o.value), ["single", "range", "month"]);
+  assert.deepEqual(periodParams.find((p) => p.name === "month"), { name: "month", label: "Month", type: "month", mode: "month" });
+  assert.equal(periodParams.find((p) => p.name === "idNumber").label, "Employee ID");
+});
+
+test("no user-facing source or documentation still says 'ID number' or 'People ID'", () => {
+  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const files = [
+    "README.md",
+    "renderer/app/js/app.js", "renderer/app/js/template.js", "renderer/app/index.html", "renderer/setup/setup.html",
+    "server/reports/attendance.js", "server/reports/absentees.js", "server/reports/export.js", "server/reports/pdf.js",
+    "server/reports/print-template.js", "server/doctor.js",
+  ];
+  for (const file of files) {
+    const text = fs.readFileSync(path.join(root, file), "utf8");
+    // The SQL column PeopleID stays as it is; only the labels and the old report key are checked.
+    assert.doesNotMatch(text, /ID number|People ID/i, file);
+    assert.doesNotMatch(text, /\bpeopleId\b/, file);
+  }
 });
 
 test("invalid input is rejected before any SQL runs", async () => {
@@ -395,7 +645,7 @@ test("Excel export follows the export template", async () => {
   await rangeBook.xlsx.load(await toXlsx(attendance, reportRows, rangeParams));
   const rangeSheet = rangeBook.worksheets[0];
   assert.deepEqual(headersOf(rangeSheet, 4), [
-    "Date", "Name", "ID number", "Department", "Card no.", "First entry", "Last entry", "Duration", "Swipes",
+    "Date", "Name", "Employee ID", "Department", "Status", "Card no.", "First entry", "Last entry", "Duration", "Swipes",
   ]);
   assert.match(rangeSheet.getRow(2).getCell(1).value, /Attendance from 2026-10-05 to 2026-10-07/);
   assert.equal(rangeSheet.getRow(5).getCell(1).value, "Ops (2)"); // the section heading, now also repeated per row
@@ -414,8 +664,8 @@ test("CSV export uses the same columns, with a BOM for Excel", () => {
   const csv = toCsv(attendance, reportRows, normalizeParams({ mode: "range", start: "2026-10-05", end: "2026-10-07" })).toString("utf8");
   assert.equal(csv.startsWith("\uFEFF"), true);
   const [head, first] = csv.replace(/^\uFEFF/, "").split("\r\n");
-  assert.equal(head, "Date,Name,ID number,Department,Card no.,First entry,Last entry,Duration,Swipes");
-  assert.equal(first, "2026-10-05,Obi Ada,7,Ops,1234,08:01:02,17:12:00,9h 11m,2");
+  assert.equal(head, "Date,Name,Employee ID,Department,Status,Card no.,First entry,Last entry,Duration,Swipes");
+  assert.equal(first, "2026-10-05,Obi Ada,7,Ops,Present,1234,08:01:02,17:12:00,9h 11m,2");
   assert.equal(csv.includes('"—"'), false); // the em dash needs no quoting
 });
 
@@ -432,7 +682,8 @@ test("CSV quotes separators and quotes inside a value", () => {
 test("HTML (Electron PDF source) export follows the export template", () => {
   const rangeHtml = toHtml(attendance, reportRows, normalizeParams({ mode: "range", start: "2026-10-05", end: "2026-10-07" }), "Reports Desk");
   assert.match(rangeHtml, /<th class="">Date<\/th>/);
-  assert.match(rangeHtml, /<th class="">ID number<\/th>/);
+  assert.match(rangeHtml, /<th class="">Employee ID<\/th>/);
+  assert.match(rangeHtml, /<th class="">Status<\/th>/);
   assert.match(rangeHtml, /<th class="">Department<\/th>/);
   assert.match(rangeHtml, /Attendance from 2026-10-05 to 2026-10-07 \(3 days\)/);
   assert.match(rangeHtml, /<td class="">2026-10-06<\/td>/);

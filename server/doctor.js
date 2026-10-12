@@ -29,7 +29,7 @@ export const TIME_COLUMN = "EventUTCTime";
  * be added to a statement through them, because they are constants rather than input.
  */
 export const EVENT_COLUMNS = Object.freeze(["PeopleID", "CardNumber", "EventCategory", "EventDescription", TIME_COLUMN]);
-export const PEOPLE_COLUMNS = Object.freeze(["PeopleID", "Firstname", "Lastname", "Department"]);
+export const PEOPLE_COLUMNS = Object.freeze(["PeopleID", "Firstname", "Lastname", "Department", "IsActive"]);
 
 /** Column types as declared in the catalog, grouped the way the report needs them. */
 const DATETIME_TYPES = new Set(["datetime", "datetime2", "smalldatetime"]);

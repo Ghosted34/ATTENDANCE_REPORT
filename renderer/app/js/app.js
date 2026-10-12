@@ -5,6 +5,7 @@ import {
 const $ = (s) => document.querySelector(s);
 const view = $("#view");
 let token = null, reportList = [];
+const PERIOD_WORDS = { single: "date", range: "date range", month: "month" };
 
 async function api(path, opts = {}) {
   const res = await fetch("/api" + path, {
@@ -103,11 +104,11 @@ function reportView(id) {
     try {
       const { rows, subtitle, columns } = await (await api(`/reports/${id}/data?${qs()}`)).json();
       const cols = columns?.length ? columns : r.columns;
-      const range = (valuesNow().mode || "single") === "range";
+      const period = PERIOD_WORDS[valuesNow().mode || "single"] || PERIOD_WORDS.single;
       out.classList.remove("hidden");
       out.innerHTML = rows.length
         ? tableHtml({ columns: cols, groupBy: r.groupBy, rows })
-        : `<div class="empty">No records for this ${range ? "date range" : "date"}. Try another ${range ? "range" : "date"}.</div>`;
+        : `<div class="empty">No records for this ${period}. Try another ${period}.</div>`;
       setMsg(`${subtitle} · ${rows.length} record${rows.length === 1 ? "" : "s"}`);
       form.querySelectorAll("[data-x]").forEach((b) => (b.disabled = !rows.length));
     } catch (err) { out.classList.add("hidden"); setMsg(err.message, "err"); }

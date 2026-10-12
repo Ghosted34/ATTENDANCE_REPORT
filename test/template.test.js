@@ -16,12 +16,12 @@ const report = {
     { name: "date", label: "Date", type: "date", mode: "single" },
     { name: "start", label: "Start date", type: "date", mode: "range" },
     { name: "end", label: "End date", type: "date", mode: "range" },
-    { name: "idNumber", label: "ID number", type: "text", optional: true, hint: "Leave blank for everyone." },
+    { name: "idNumber", label: "Employee ID", type: "text", optional: true, hint: "Leave blank for everyone." },
   ],
   groupBy: "department",
   columns: [
     { key: "name", label: "Name" },
-    { key: "idNumber", label: "ID number" },
+    { key: "idNumber", label: "Employee ID" },
   ],
 };
 
@@ -95,4 +95,29 @@ test("csvFor and exportFileName match the mode", () => {
     "attendance-2026-08-16_to_2026-08-19.csv");
   assert.equal(exportFileName("attendance", { mode: "single", date: "2026-08-16" }, "xlsx"),
     "attendance-2026-08-16.xlsx");
+});
+
+test("month fields render as a month input, default to the current month and name the download by month", () => {
+  const monthReport = {
+    ...report,
+    params: [
+      { name: "mode", label: "Report for", type: "select", default: "single",
+        options: [{ value: "single", label: "Single date" }, { value: "month", label: "Month" }] },
+      { name: "month", label: "Month", type: "month", mode: "month" },
+    ],
+  };
+  const html = paramFieldsHtml(monthReport, { mode: "month", month: "2026-10" });
+  assert.match(html, /<input id="p_month" name="month" type="month" value="2026-10"[^>]*required>/);
+  assert.match(html, /data-mode="month"/);
+
+  const { values } = resolveReportParams(monthReport, { query: parseQuery(""), today: "2026-10-12" });
+  assert.equal(values.month, "2026-10"); // the current month, from today's local date
+  assert.equal(values.mode, "single");
+
+  const fromUrl = resolveReportParams(monthReport, { query: parseQuery("?mode=month&month=2028-02"), today: "2026-10-12" });
+  assert.equal(fromUrl.values.month, "2028-02");
+
+  assert.equal(exportFileName("attendance", { mode: "month", month: "2026-10" }, "pdf"), "attendance-2026-10.pdf");
+  assert.equal(exportFileName("absentees", { mode: "month", month: "2026-02" }, "csv"), "absentees-2026-02.csv");
+  assert.equal(exportFileName("absentees", { mode: "single", date: "2026-10-05" }, "xlsx"), "absentees-2026-10-05.xlsx");
 });

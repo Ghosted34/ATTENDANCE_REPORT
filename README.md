@@ -71,32 +71,63 @@ Build the Windows installer with:
 npm run dist
 ```
 
+The installer is an NSIS, per-user, x64 build of **Reports Desk** (`com.reportsdesk.app`), configured in `electron-builder.json`. The build must run on Windows (or a Windows-capable CI runner); the configuration itself is checked by `npm test`.
+
+### Upgrading an installed copy
+
+Install the new build **over the existing installation**; no uninstall is needed. This keeps the same settings:
+
+- **Same identity.** The app ID (`com.reportsdesk.app`) and product name (`Reports Desk`) do not change. electron-builder derives the installer's uninstall entry from the app ID, so the new build replaces the old one in place. Changing either value would install a second copy and point at a different settings folder.
+- **Settings are not touched.** Desktop settings live in Electron's per-user `userData` folder for the product (on Windows, `%APPDATA%\Reports Desk\config.json`). The installer does not remove it on upgrade or uninstall: `nsis.deleteAppDataOnUninstall` is `false`.
+- **Each PC and Windows user has its own settings.** The connection string is encrypted with `safeStorage`, which is tied to the Windows user on that PC, so it cannot be read elsewhere. Do not copy `config.json` between PCs or users; on a new PC or for a new user, the first launch asks for the connection string again.
+- **Dev runs use a different folder.** `npm start` runs unpackaged, so Electron names its `userData` folder from `package.json`'s `name` (`reports-desk`), not from the product name. Settings saved while developing are therefore separate from the installed app's.
+
 ## Running the daily attendance report
 
 The report form has a **Report for** choice:
 
-- **Single date** (default) — pick one day; the table shows Name, ID number, Card no., First entry, Last entry, Duration and Swipes, grouped by department.
-- **Date range** — pick a **Start date** and an **End date**; results get a leading **Date** column and contain one row per person per local calendar day, so the same person's days are never merged into a single row.
+- **Single date** (default) — pick one day.
+- **Date range** — pick a **Start date** and an **End date** (both included). Results get a leading **Date** column and one row per person per local calendar day, so the same person's days are never merged.
+- **Month** — pick a calendar month (`YYYY-MM`). It covers the first to the last day of that month, with the same Date column as a range.
 
-**ID number** (optional) limits a run to one person. It matches `dbo.EventHistory.PeopleID` exactly; leave it blank for everyone.
+Every period shows the same columns: **Name**, **Employee ID**, **Status** (`Present` or `Absent`), **Card no.**, **First entry**, **Last entry**, **Duration** and **Swipes**, grouped by department. A period covering more than one day adds **Date** in front. Active employees who did not swipe on a day appear as `Absent` on that day (see **Absence** below), so the report lists everyone who should have been there, not only the people who swiped.
 
-Both modes use the same parameterized SQL, the same `TZ_OFFSET_HOURS` shift, and the same one-row-per-person-per-local-day grouping; a single date is simply a one-day range. Invalid dates (for example `2026-02-31`), ranges whose start is after the end, and ID numbers containing anything but letters, digits, dashes or underscores are refused in the browser and by the API with HTTP `400`, so exports cannot be produced from bad input either. SQL Server date-shape errors (`241`, `242` or `9810`) point at `npm run doctor`, which explains the relevant column or rows — see **If a report fails with a SQL Server date-shape error**.
+**Employee ID** (optional) limits a run to one person. It matches `dbo.EventHistory.PeopleID` (and `dbo.p_people.PeopleID`) exactly; leave it blank for everyone. The field keeps its database meaning; only the label on screen, in exports and here changed.
+
+Every period uses the same parameterized SQL, the same `TZ_OFFSET_HOURS` shift and the same one-row-per-person-per-local-day grouping; a single date is a one-day range and a month is a range from its first to its last day. Invalid dates (for example `2026-02-31`), an invalid month (for example `2026-13`), ranges whose start is after the end, ranges longer than **366 days**, and Employee IDs containing anything but letters, digits, dashes or underscores are refused in the browser and by the API with HTTP `400`, so exports cannot be produced from bad input either. SQL Server date-shape errors (`241`, `242` or `9810`) point at `npm run doctor`, which explains the relevant column or rows — see **If a report fails with a SQL Server date-shape error**.
+
+### Absentee report
+
+The **Absentees** report is a separate entry on the report list. It takes the same **Report for** choices (single date, date range or month), the same optional Employee ID filter and the same absence rule, but returns only the `Absent` rows: **Name**, **Employee ID** (plus **Date** for a range or month, and **Department** in exports). Because it shares the attendance report's code path, the two can never disagree about who is absent.
+
+### Absence
+
+- **Who can be absent:** only people whose `dbo.p_people.IsActive` is `1`. `0` (inactive, or not yet employed) is never marked absent, and neither is a `NULL` or unreadable value, so an unknown status is never reported as an absence. There is no hire-date rule: a person who has not started yet must have `IsActive = 0` until they do.
+- **What counts as absent:** an eligible person with **no granted access swipe on that local day**. Denied or non-access events do not count as presence. Each person is reported once per day as either `Present` or `Absent`, never both.
+- **Ranges and months:** absence is per person per day, so a 31-day month can give one row per absent day. The grain is a deliberate choice that keeps partial absences visible.
+- **Weekends** count as absence days by default. To skip Saturdays and Sundays, set `ABSENCE_SKIP_WEEKENDS = true` in `server/reports/attendance.js`.
+- **Future days are never reported.** Days after today (local date, from `TZ_OFFSET_HOURS`) are left out, so they cannot appear as absent. **Today is included**, so today's absences are provisional until the day has ended: someone who has not swiped yet this morning shows as `Absent` until they do.
+- If the eligibility lookup fails, the report fails with an error. It never falls back to showing nobody as absent.
 
 The toolbar's query string is the whole API contract, and both browser and Electron mode use it:
 
 | Parameter | Used by | Description |
 | --- | --- | --- |
-| `mode` | Both | `single` (default when omitted) or `range` |
+| `mode` | Both | `single` (default when omitted), `range` or `month` |
 | `date` | `mode=single` | Local day as `YYYY-MM-DD` |
-| `start`, `end` | `mode=range` | Local first and last day as `YYYY-MM-DD` |
-| `idNumber` | Both | Optional `PeopleID` filter |
+| `start`, `end` | `mode=range` | Local first and last day as `YYYY-MM-DD` (inclusive, at most 366 days) |
+| `month` | `mode=month` | Calendar month as `YYYY-MM` |
+| `idNumber` | Both | Optional Employee ID (`PeopleID`) filter; the query parameter keeps its original name |
 
-The **Excel**, **CSV** and **PDF** buttons export whatever the form currently holds, so the filters always match the screen. Exports repeat the grouping column (**Department**) per row, which keeps a filtered or sorted sheet readable, and are named for the window they cover:
+The absentee report uses the same parameters at `/api/reports/absentees/{data,xlsx,csv,pdf}`.
 
-| Mode | Excel | CSV | PDF |
-| --- | --- | --- | --- |
-| Single date | `attendance-2026-10-05.xlsx` | `attendance-2026-10-05.csv` | `attendance-2026-10-05.pdf` |
-| Date range | `attendance-2026-10-04_to_2026-10-06.xlsx` | `attendance-2026-10-04_to_2026-10-06.csv` | `attendance-2026-10-04_to_2026-10-06.pdf` |
+The **Excel**, **CSV** and **PDF** buttons export whatever the form currently holds, so the filters always match the screen. Exports carry the same columns as the screen, with **Department** inserted straight after **Employee ID** so a filtered or sorted sheet still says who belongs to which department. They are named for the window they cover:
+
+| Mode | Attendance (Excel, CSV, PDF) | Absentees |
+| --- | --- | --- |
+| Single date | `attendance-2026-10-05.*` | `absentees-2026-10-05.*` |
+| Date range | `attendance-2026-10-04_to_2026-10-06.*` | `absentees-2026-10-04_to_2026-10-06.*` |
+| Month | `attendance-2026-10.*` | `absentees-2026-10.*` |
 
 ## Report template
 
@@ -136,9 +167,9 @@ Shell environment variables override values from `.env`. Do not commit `.env`; i
 The attendance report (`server/reports/attendance.js`) expects:
 
 - `dbo.EventHistory`: `PeopleID`, `CardNumber`, `EventCategory`, `EventDescription`, `EventUTCTime`
-- `dbo.p_people`: `PeopleID`, `Firstname`, `Lastname`, `Department`
+- `dbo.p_people`: `PeopleID`, `Firstname`, `Lastname`, `Department`, `IsActive` (1 = active; only active people can be absent)
 
-It filters for granted access events and groups results by person **and local calendar day**. Event times are stored in UTC and shifted by `TZ_OFFSET_HOURS`; the queried UTC window runs from local midnight of the first selected day to local midnight after the last one. In range mode each row also carries its local date for the UI and the exports. The optional ID number filter compares `PeopleID` as text, so it works whether that column is numeric or a GUID.
+It filters for granted access events and groups results by person **and local calendar day**. Absences come from a second, read-only query over the active roster (`TRY_CONVERT(int, pp.IsActive) = 1`), compared with the swipes in application code; see **Absence** above. Event times are stored in UTC and shifted by `TZ_OFFSET_HOURS`; the queried UTC window runs from local midnight of the first selected day to local midnight after the last one. In range and month mode each row also carries its local date for the UI and the exports. The optional Employee ID filter compares `PeopleID` as text, so it works whether that column is numeric or a GUID.
 
 `EventUTCTime` may be a real date/time column (`date`, `datetime`, `smalldatetime`, `datetime2`) or a legacy character column. The report reads its declared type from the catalog once per run and uses the matching statement: the plain column for time-bearing date/time types, so the index on it stays usable, or `TRY_CONVERT(datetime2(3), eh.EventUTCTime)`, which skips rows whose text cannot be parsed instead of failing the whole report. A date-only column also uses the datetime2-safe path so hour shifts are legal, but it contains no time-of-day: every stored entry time is midnight, so the report shows duration and last-entry fields as `—`. An unknown or unreadable type falls back to the text-safe statement.
 
@@ -160,4 +191,4 @@ It sends nothing but `SELECT`s, looks up only the columns listed under **Databas
 npm test
 ```
 
-Covers the shared connection-string configuration (`server/config.js`, `server/env.js`), the report's validation, integer window, executable typed window builders and statement selection (including the text-safe and date-only paths), columns, subtitles and rows, the Excel/CSV/HTML/PDF exports and the print template, the renderer's report template (URL presets, extra parameters, table and CSV rendering), the doctor's checks, its identifier allowlist and 241/242/9810 hint path, plus the Express API's 400/401/403/404 behaviour. No external services are needed: every test runs against an injected query function, so a plain `npm install` is enough.
+Covers the shared connection-string configuration (`server/config.js`, `server/env.js`), the attendance report's validation (single date, range and month, inclusive boundaries, leap years, the 366-day cap), the integer window and statement selection (including the text-safe and date-only paths), the Employee ID labels, the Department and Status columns and their alignment in every export, absence (active roster only, one row per person per day, the future-day cut-off and the weekend setting), the absentee-only report, the Excel/CSV/HTML/PDF exports and the print template, the renderer's report template (URL presets, month fields, file names), the doctor's checks, its identifier allowlist and 241/242/9810 hint path, the installer configuration that keeps settings across an upgrade, plus the Express API's 400/401/403/404 behaviour. Nothing needs a database: every SQL call goes through an injected query function. No external services are needed: every test runs against an injected query function, so a plain `npm install` is enough.
