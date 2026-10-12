@@ -7,8 +7,9 @@ import { fileURLToPath } from "node:url";
 import attendance, {
   ABSENCE_SKIP_WEEKENDS, absentRows, columnsFor, daysInPeriod, exportColumnsFor, isIsoDate, isWeekend, localToday,
   MAX_PERIOD_DAYS, monthBounds, normalizeParams, periodParams, rangeDays, readEventTimeType, ROSTER_SQL, runPeriod,
-  statementFor, subtitle, TEXT_SAFE_STATEMENT,
+  statementFor, subtitle, TEXT_SAFE_STATEMENT, weekdayOf,
 } from "../server/reports/attendance.js";
+import absentees, { columnsFor as absenteesColumnsFor } from "../server/reports/absentees.js";
 import { classifyColumn, isDateShapeError, isError241 } from "../server/doctor.js";
 import { columnsOf, toCsv, toHtml, toXlsx } from "../server/reports/export.js";
 import { toPdf } from "../server/reports/pdf.js";
@@ -40,13 +41,14 @@ const swipesIn = (params = {}) => dbRows.filter((r) => {
   return params.startYmd === undefined || (ymd >= params.startYmd && ymd <= params.endYmd);
 });
 
-// The rows the report hands to the UI and the exports.
+// The rows the report hands to the UI and the exports, in the order it hands them over:
+// by department, then by date. 5 October 2026 is a Monday, the 6th a Tuesday.
 const reportRows = [
-  { date: "2026-10-05", name: "Obi Ada", idNumber: 7, department: "Ops", cardNumber: 1234,
+  { date: "2026-10-05", day: "Monday", name: "Obi Ada", idNumber: 7, department: "Ops", cardNumber: 1234,
     firstEntry: "08:01:02", lastEntry: "17:12:00", duration: "9h 11m", accessCount: 2, status: "Present" },
-  { date: "2026-10-06", name: "Obi Ada", idNumber: 7, department: "Ops", cardNumber: 1234,
+  { date: "2026-10-06", day: "Tuesday", name: "Obi Ada", idNumber: 7, department: "Ops", cardNumber: 1234,
     firstEntry: "07:58:41", lastEntry: "—", duration: "—", accessCount: 1, status: "Present" },
-  { date: "2026-10-06", name: "Nwosu Ben", idNumber: 9, department: "Security", cardNumber: 9876,
+  { date: "2026-10-06", day: "Tuesday", name: "Nwosu Ben", idNumber: 9, department: "Security", cardNumber: 9876,
     firstEntry: "06:30:00", lastEntry: "18:00:00", duration: "11h 30m", accessCount: 4, status: "Present" },
 ];
 
@@ -185,22 +187,29 @@ test("rangeDays counts both ends", () => {
 
 /* ---------- Columns and subtitle ---------- */
 
-test("the screen table is Name, Employee ID, Status, … and a period longer than one day adds Date", () => {
+test("the screen table leads with Day (and Date for a longer period), and Department is a column of its own", () => {
   assert.deepEqual(columnsFor({ mode: "single", date: "2026-10-05" }).map((c) => c.key), [
-    "name", "idNumber", "status", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
+    "day", "name", "idNumber", "department", "status", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
   ]);
   assert.deepEqual(columnsFor({ mode: "range", start: "2026-10-05", end: "2026-10-07" }).map((c) => c.key), [
-    "date", "name", "idNumber", "status", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
+    "date", "day", "name", "idNumber", "department", "status", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
   ]);
   assert.deepEqual(columnsFor({ mode: "month", month: "2026-10" }).map((c) => c.key), [
-    "date", "name", "idNumber", "status", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
+    "date", "day", "name", "idNumber", "department", "status", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
   ]);
-  assert.equal(columnsFor({})[1].label, "Employee ID");
+  // Date and Day are adjacent in both orders, and Day is the first column when there is no Date.
+  assert.equal(columnsFor({ mode: "single", date: "2026-10-05" })[0].label, "Day");
+  assert.equal(columnsFor({ mode: "month", month: "2026-10" })[1].label, "Day");
+  // No period at all (the legacy call): Day still leads, and no Date column is invented.
+  assert.deepEqual(columnsFor({}).map((c) => c.label), [
+    "Day", "Name", "Employee ID", "Department", "Status", "Card no.", "First entry", "Last entry", "Duration", "Swipes",
+  ]);
   assert.equal(attendance.columns.some((c) => c.key === "peopleId"), false);
-  assert.equal(attendance.columns.length, 8); // legacy shape keeps the single-date columns
+  assert.equal(attendance.columns.length, 9); // legacy shape: the single-date columns, minus Day/Date
+  assert.equal(attendance.columns.some((c) => ["day", "date"].includes(c.key)), false);
 });
 
-test("exported columns are the screen columns with Department straight after the Employee ID", () => {
+test("exports carry exactly the screen columns, so nothing has to be inserted into a sheet", () => {
   for (const params of [
     { mode: "single", date: "2026-10-05" },
     { mode: "range", start: "2026-10-05", end: "2026-10-07" },
@@ -208,27 +217,102 @@ test("exported columns are the screen columns with Department straight after the
   ]) {
     const screen = columnsFor(params).map((c) => c.key);
     const exported = exportColumnsFor(params).map((c) => c.key);
-    // Nothing moves except the inserted department, so the sheet lines up with the screen.
-    assert.deepEqual(exported.filter((k) => k !== "department"), screen, params.mode);
-    assert.equal(exported[exported.indexOf("idNumber") + 1], "department", params.mode);
+    assert.deepEqual(exported, screen, params.mode);
+    assert.equal(screen.includes("department"), true, params.mode); // visible on screen, not only in the sheet
+    assert.equal(screen.indexOf("day"), screen.indexOf("date") + 1, params.mode);
   }
   assert.deepEqual(exportColumnsFor({ mode: "single", date: "2026-10-05" }).map((c) => c.key), [
-    "name", "idNumber", "department", "status", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
+    "day", "name", "idNumber", "department", "status", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
   ]);
   assert.deepEqual(exportColumnsFor({ mode: "range", start: "2026-10-05", end: "2026-10-07" }).map((c) => c.key), [
-    "date", "name", "idNumber", "department", "status", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
+    "date", "day", "name", "idNumber", "department", "status", "cardNumber", "firstEntry", "lastEntry", "duration", "accessCount",
   ]);
 });
 
-test("subtitle names the day, the range or the month, and its length", () => {
-  assert.equal(subtitle({ mode: "single", date: "2026-10-05" }), "Attendance for 2026-10-05");
-  assert.equal(subtitle({ date: "2026-10-05" }), "Attendance for 2026-10-05");
+test("subtitle names the day (with its weekday), the range or the month, and its length", () => {
+  // A single date has no Date column, so the weekday is named in the subtitle.
+  assert.equal(subtitle({ mode: "single", date: "2026-10-05" }), "Attendance for 2026-10-05 (Monday)");
+  assert.equal(subtitle({ date: "2026-10-05" }), "Attendance for 2026-10-05 (Monday)");
+  assert.equal(subtitle({ date: "2026-10-11" }), "Attendance for 2026-10-11 (Sunday)");
+  assert.equal(subtitle({ date: "" }), "Attendance for "); // nothing to name: never an Invalid Date
   assert.equal(subtitle({ mode: "range", start: "2026-10-05", end: "2026-10-07" }),
     "Attendance from 2026-10-05 to 2026-10-07 (3 days)");
   assert.equal(subtitle({ mode: "range", start: "2026-10-05", end: "2026-10-05" }),
     "Attendance from 2026-10-05 to 2026-10-05 (1 day)");
   assert.equal(subtitle({ mode: "month", month: "2026-02" }),
     "Attendance for February 2026 (2026-02-01 to 2026-02-28, 28 days)");
+});
+
+test("the Day column names each row's weekday in every period, and the absentee report has it too", async () => {
+  const { queryFn } = fakeQuery();
+  const single = await attendance.run({ date: "2026-10-05" }, { tz: 1, queryFn, now: NOW });
+  assert.deepEqual(single.map((r) => [r.date, r.day, r.status]), [
+    ["2026-10-05", "Monday", "Present"], // Ops: Ada swiped, Chi did not
+    ["2026-10-05", "Monday", "Absent"],
+    ["2026-10-05", "Monday", "Absent"], // Security: Ben did not
+  ]);
+
+  const range = await attendance.run({ mode: "range", start: "2026-10-05", end: "2026-10-07" }, { tz: 1, queryFn, now: NOW });
+  const weekdays = { "2026-10-05": "Monday", "2026-10-06": "Tuesday", "2026-10-07": "Wednesday" };
+  assert.equal(range.length > 0, true);
+  for (const row of range) assert.equal(row.day, weekdays[row.date], `${row.date} is a ${weekdays[row.date]}`);
+
+  // The absentee report leaves out the swipe columns, but keeps the same period columns.
+  const absenteeRows = await absentees.run({ mode: "range", start: "2026-10-05", end: "2026-10-07" }, { tz: 1, queryFn, now: NOW });
+  assert.equal(absenteeRows.every((r) => r.status === "Absent"), true);
+  assert.deepEqual(absenteeRows.map((r) => [r.date, r.day]).slice(0, 2), [["2026-10-05", "Monday"], ["2026-10-06", "Tuesday"]]);
+  assert.deepEqual(absenteesColumnsFor({ mode: "single", date: "2026-10-05" }).map((c) => c.key),
+    ["day", "name", "idNumber", "department"]);
+  assert.deepEqual(absenteesColumnsFor({ mode: "month", month: "2026-10" }).map((c) => c.key),
+    ["date", "day", "name", "idNumber", "department"]);
+});
+
+test("rows run by department and date, and on each day the present people come before the absentees", async () => {
+  const { queryFn } = fakeQuery();
+  const rows = await attendance.run({ mode: "range", start: "2026-10-05", end: "2026-10-07" }, { tz: 1, queryFn, now: NOW });
+
+  // Ops first with its three days in order; Ada's swipes before Chi's absences on each of them,
+  // and on a day nobody swiped the two absences are alphabetical.
+  assert.deepEqual(rows.map((r) => [r.department, r.date, r.status, r.name]), [
+    ["Ops", "2026-10-05", "Present", "Obi Ada"],
+    ["Ops", "2026-10-05", "Absent", "Eze Chi"],
+    ["Ops", "2026-10-06", "Present", "Obi Ada"],
+    ["Ops", "2026-10-06", "Absent", "Eze Chi"],
+    ["Ops", "2026-10-07", "Absent", "Eze Chi"],
+    ["Ops", "2026-10-07", "Absent", "Obi Ada"],
+    ["Security", "2026-10-05", "Absent", "Nwosu Ben"],
+    ["Security", "2026-10-06", "Present", "Nwosu Ben"],
+    ["Security", "2026-10-07", "Absent", "Nwosu Ben"],
+  ]);
+
+  // The same rule read as properties: grouped by department, dated inside it, Present first each day.
+  const sections = Map.groupBy(rows, (r) => r.department);
+  assert.deepEqual([...sections.keys()], ["Ops", "Security"]);
+  for (const [department, section] of sections) {
+    const dates = section.map((r) => r.date);
+    assert.deepEqual(dates, [...dates].sort(), `${department} runs by date`);
+    for (const [date, day] of Map.groupBy(section, (r) => r.date)) {
+      const statuses = day.map((r) => r.status);
+      const lastPresent = statuses.lastIndexOf("Present");
+      const firstAbsent = statuses.indexOf("Absent");
+      if (lastPresent >= 0 && firstAbsent >= 0) {
+        assert.ok(lastPresent < firstAbsent, `${department} ${date}: no Present row after an Absent one (${statuses})`);
+      }
+      assert.equal(new Set(day.map((r) => r.name)).size, day.length, `${department} ${date} has one row per person`);
+    }
+  }
+});
+
+test("the weekday comes from the calendar date alone, so leap days and month boundaries cannot shift it", () => {
+  assert.equal(weekdayOf("2026-10-05"), "Monday");
+  assert.equal(weekdayOf("2028-02-29"), "Tuesday"); // a leap day
+  assert.equal(weekdayOf("2026-12-31"), "Thursday");
+  assert.equal(weekdayOf("2027-01-01"), "Friday");
+  // Whatever the machine's clock and time zone think, a whole month always names its 30/31 days.
+  for (const date of daysInPeriod("2026-10-01", "2026-10-31")) {
+    assert.equal(isWeekend(date), ["Saturday", "Sunday"].includes(weekdayOf(date)), date);
+  }
+  assert.equal(new Set(daysInPeriod("2026-10-01", "2026-10-31").map(weekdayOf)).size, 7);
 });
 
 /* ---------- Query ---------- */
@@ -645,18 +729,20 @@ test("Excel export follows the export template", async () => {
   await rangeBook.xlsx.load(await toXlsx(attendance, reportRows, rangeParams));
   const rangeSheet = rangeBook.worksheets[0];
   assert.deepEqual(headersOf(rangeSheet, 4), [
-    "Date", "Name", "Employee ID", "Department", "Status", "Card no.", "First entry", "Last entry", "Duration", "Swipes",
+    "Date", "Day", "Name", "Employee ID", "Department", "Status", "Card no.", "First entry", "Last entry", "Duration", "Swipes",
   ]);
   assert.match(rangeSheet.getRow(2).getCell(1).value, /Attendance from 2026-10-05 to 2026-10-07/);
   assert.equal(rangeSheet.getRow(5).getCell(1).value, "Ops (2)"); // the section heading, now also repeated per row
   assert.equal(rangeSheet.getRow(6).getCell(1).value, "2026-10-05");
-  assert.equal(rangeSheet.getRow(6).getCell(4).value, "Ops");
+  assert.equal(rangeSheet.getRow(6).getCell(2).value, "Monday");
+  assert.equal(rangeSheet.getRow(6).getCell(5).value, "Ops");
 
   const singleParams = normalizeParams({ date: "2026-10-05" });
   const singleBook = new ExcelJS.Workbook();
   await singleBook.xlsx.load(await toXlsx(attendance, reportRows, singleParams));
   const headers = headersOf(singleBook.worksheets[0], 4);
   assert.equal(headers.includes("Date"), false);
+  assert.equal(headers[0], "Day"); // the single date's weekday still starts the row
   assert.equal(headers.includes("Department"), true);
 });
 
@@ -664,8 +750,8 @@ test("CSV export uses the same columns, with a BOM for Excel", () => {
   const csv = toCsv(attendance, reportRows, normalizeParams({ mode: "range", start: "2026-10-05", end: "2026-10-07" })).toString("utf8");
   assert.equal(csv.startsWith("\uFEFF"), true);
   const [head, first] = csv.replace(/^\uFEFF/, "").split("\r\n");
-  assert.equal(head, "Date,Name,Employee ID,Department,Status,Card no.,First entry,Last entry,Duration,Swipes");
-  assert.equal(first, "2026-10-05,Obi Ada,7,Ops,Present,1234,08:01:02,17:12:00,9h 11m,2");
+  assert.equal(head, "Date,Day,Name,Employee ID,Department,Status,Card no.,First entry,Last entry,Duration,Swipes");
+  assert.equal(first, "2026-10-05,Monday,Obi Ada,7,Ops,Present,1234,08:01:02,17:12:00,9h 11m,2");
   assert.equal(csv.includes('"—"'), false); // the em dash needs no quoting
 });
 
@@ -682,16 +768,19 @@ test("CSV quotes separators and quotes inside a value", () => {
 test("HTML (Electron PDF source) export follows the export template", () => {
   const rangeHtml = toHtml(attendance, reportRows, normalizeParams({ mode: "range", start: "2026-10-05", end: "2026-10-07" }), "Reports Desk");
   assert.match(rangeHtml, /<th class="">Date<\/th>/);
+  assert.match(rangeHtml, /<th class="">Day<\/th>/);
   assert.match(rangeHtml, /<th class="">Employee ID<\/th>/);
   assert.match(rangeHtml, /<th class="">Status<\/th>/);
   assert.match(rangeHtml, /<th class="">Department<\/th>/);
   assert.match(rangeHtml, /Attendance from 2026-10-05 to 2026-10-07 \(3 days\)/);
-  assert.match(rangeHtml, /<td class="">2026-10-06<\/td>/);
+  assert.match(rangeHtml, /<td class="">2026-10-06<\/td><td class="">Tuesday<\/td>/); // date, then its weekday
   assert.match(rangeHtml, /@page\{size:A4 landscape/); // shared page setup in print-template.js
 
   const singleHtml = toHtml(attendance, reportRows, normalizeParams({ date: "2026-10-05" }), "Reports Desk");
   assert.doesNotMatch(singleHtml, /<th class="">Date<\/th>/);
+  assert.match(singleHtml, /<th class="">Day<\/th>/);
   assert.match(singleHtml, /<th class="">Department<\/th>/);
+  assert.match(singleHtml, /Attendance for 2026-10-05 \(Monday\)/);
 });
 
 test("PDFKit export renders the range report with a Date column", async () => {

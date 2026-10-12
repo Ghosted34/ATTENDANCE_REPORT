@@ -1,4 +1,4 @@
-import { columnsFor as periodColumns, normalizeParams, periodParams, periodSubtitle, runPeriod } from "./attendance.js";
+import { normalizeParams, periodColumnsFor, periodParams, periodSubtitle, runPeriod } from "./attendance.js";
 
 /**
  * Absentee-only report: the same periods, the same parameterized swipe and roster queries, and the
@@ -6,23 +6,19 @@ import { columnsFor as periodColumns, normalizeParams, periodParams, periodSubti
  * anything itself, so the two reports can never disagree about who is absent.
  */
 
-// Absent rows have no swipe, so no card, entry or duration columns: name and Employee ID only.
+// Absent rows have no swipe, so no card, entry or duration columns: who the person is, where they
+// work, and — through the shared period columns — the date and its weekday.
 const COLUMNS = [
   { key: "name", label: "Name" },
   { key: "idNumber", label: "Employee ID" },
+  { key: "department", label: "Department" },
 ];
 
-/** Range and month periods add the Date column in front, as they do on the attendance report. */
-export const columnsFor = (params = {}) => (periodColumns(params)[0]?.key === "date"
-  ? [{ key: "date", label: "Date" }, ...COLUMNS]
-  : [...COLUMNS]);
+/** The same period columns as the attendance report: Date for a range or month, Day for every period. */
+export const columnsFor = (params = {}) => periodColumnsFor(COLUMNS, params);
 
-/** Exports carry Department after the Employee ID, matching the attendance report. */
-export const exportColumnsFor = (params = {}) => {
-  const cols = columnsFor(params);
-  const at = cols.findIndex((c) => c.key === "idNumber") + 1;
-  return [...cols.slice(0, at), { key: "department", label: "Department" }, ...cols.slice(at)];
-};
+/** Screen and exports use the one list, exactly as they do on the attendance report. */
+export const exportColumnsFor = (params = {}) => columnsFor(params);
 
 export const subtitle = (params = {}) => periodSubtitle(params, "Absentees");
 
