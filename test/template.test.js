@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   csvFor, emptyStateHtml, escapeHtml, exportFileName, groupByToggleHtml, isoToday,
-  paramFieldsHtml, parseQuery, resolveReportParams, tableHtml,
+  paramFieldsHtml, parseQuery, resolveReportParams, sortRows, tableHtml,
 } from "../renderer/app/js/template.js";
 
 const report = {
@@ -82,23 +82,26 @@ test("tableHtml renders group headings, alignment and wrapping", () => {
   });
   assert.match(html, /<tr class="grp"><td colspan="3">Ops \(1\)<\/td><\/tr>/);
   assert.match(html, /<tr class="grp"><td colspan="3">Security \(1\)<\/td><\/tr>/);
-  assert.match(html, /<th scope="col" class="right">Swipes<\/th>/);
+  assert.match(html, /<th scope="col" class="right"><button type="button" class="th-sort" data-sort-key="accessCount">Swipes<\/button><\/th>/);
   assert.match(html, /<td class="wrap">Ops<\/td>/);
   assert.equal(tableHtml({ columns, groupBy: null, rows: [{ name: "A", department: "D", accessCount: 1 }] })
     .includes("grp"), false);
-  // Verify accessibility attributes are present
-  assert.match(html, /aria-label="Report grouped by department"/);
-  assert.match(html, /<caption class="sr-only">/);
-  assert.match(html, /<th scope="col" class="">Name<\/th>/);
+  // The caption is the table's name. Assert the duplicate is gone, not just that the caption is
+  // there: a table announced twice is the defect being guarded against.
+  assert.match(html, /<caption class="sr-only">Report grouped by department<\/caption>/);
+  assert.equal(html.includes("aria-label"), false, "the caption already names the table");
+  assert.match(html, /<th scope="col" class=""><button type="button" class="th-sort" data-sort-key="name">Name<\/button><\/th>/);
 });
 
 test("tableHtml includes accessibility attributes for all headers", () => {
   const columns = [{ key: "name", label: "Name" }, { key: "age", label: "Age", align: "right" }];
   const html = tableHtml({ columns, groupBy: null, rows: [{ name: "A", age: 30 }] });
-  assert.match(html, /<th scope="col" class="">Name<\/th>/);
-  assert.match(html, /<th scope="col" class="right">Age<\/th>/);
-  assert.match(html, /aria-label="Report"/);
+  assert.match(html, /<th scope="col" class=""><button[^>]*>Name<\/button><\/th>/);
+  assert.match(html, /<th scope="col" class="right"><button[^>]*>Age<\/button><\/th>/);
   assert.match(html, /<caption class="sr-only">Report<\/caption>/);
+  // Every header is sortable, and none of them claims a sort direction until one is sorted.
+  assert.equal([...html.matchAll(/<button type="button" class="th-sort"/g)].length, 2);
+  assert.equal(html.includes("aria-sort"), false);
 });
 
 test("tableHtml with custom statusPill renders status as pills", () => {
@@ -222,4 +225,91 @@ test("paramFieldsHtml omits the fields the caller draws itself", () => {
   assert.match(html, /<input id="p_idNumber" name="idNumber" type="text"/);
   assert.equal(paramFieldsHtml(report, values).includes('name="mode"'), true);
   assert.equal(paramFieldsHtml(report, values, { omit: [] }).includes('name="mode"'), true);
+});
+
+test("sortRows orders by the column's own kind and leaves the blanks at the bottom", () => {
+  const rows = [
+    { name: "Ada", accessCount: 10, date: "2026-10-07" },
+    { name: "chidi", accessCount: 9, date: "" },
+    { name: "Ben", accessCount: null, date: "2026-10-05" },
+  ];
+  const names = (list) => list.map((r) => r.name);
+
+  // A person sorting names does not expect "chidi" after "Ben" because of its case.
+  assert.deepEqual(names(sortRows(rows, { key: "name", dir: "asc" })), ["Ada", "Ben", "chidi"]);
+  assert.deepEqual(names(sortRows(rows, { key: "name", dir: "desc" })), ["chidi", "Ben", "Ada"]);
+
+  // Numbers compare as numbers, not as the text "10" < "9".
+  assert.deepEqual(names(sortRows(rows, { key: "accessCount", dir: "asc" })), ["chidi", "Ada", "Ben"]);
+  assert.deepEqual(names(sortRows(rows, { key: "accessCount", dir: "desc" })), ["Ada", "chidi", "Ben"]);
+
+  // Dates as text still sort chronologically; the empty one goes last either way.
+  assert.deepEqual(names(sortRows(rows, { key: "date", dir: "asc" })), ["Ben", "Ada", "chidi"]);
+  assert.deepEqual(names(sortRows(rows, { key: "date", dir: "desc" })), ["Ada", "Ben", "chidi"]);
+
+  // No sort means the rows are handed back untouched, in the report's own order.
+  assert.equal(sortRows(rows, null), rows);
+  assert.equal(sortRows(rows, {}), rows);
+
+  // Equal values keep the order the report produced them in.
+  const ties = [{ k: 1, n: "first" }, { k: 1, n: "second" }];
+  assert.deepEqual(sortRows(ties, { key: "k", dir: "asc" }).map((r) => r.n), ["first", "second"]);
+});
+
+test("tableHtml carries min-width on the column it belongs to, not on a position", () => {
+  const columns = [
+    { key: "name", label: "Name", minWidth: 150 },
+    { key: "id", label: "Employee ID", minWidth: 80 },
+    { key: "note", label: "Note" },
+  ];
+  const html = tableHtml({ columns, groupBy: null, rows: [{ name: "Ada", id: "1", note: "x" }] });
+  // The width travels with the column, so it cannot land on a neighbour when a report or a
+  // period changes how many columns come first (which is what nth-child rules did).
+  assert.match(html, /<th scope="col" class="" style="min-width:150px"><button[^>]*>Name<\/button><\/th>/);
+  assert.match(html, /<td class="" style="min-width:150px">Ada<\/td>/);
+  assert.match(html, /class="" style="min-width:80px"/);
+  // A column without one gets no style attribute at all.
+  assert.equal(html.includes('class="" style="min-width:undefined"'), false);
+  assert.match(html, /<td class="">x<\/td>/);
+  // Nonsense is ignored rather than emitted.
+  assert.equal(tableHtml({ columns: [{ key: "a", label: "A", minWidth: "wide" }], rows: [{ a: 1 }] }).includes("min-width"), false);
+});
+
+test("tableHtml marks the sorted column in words and sorts inside the group headings", () => {
+  const columns = [{ key: "department", label: "Department" }, { key: "name", label: "Name" }];
+  const rows = [
+    { department: "Ops", name: "Zara" },
+    { department: "Ops", name: "Ada" },
+    { department: "Security", name: "Yusuf" },
+  ];
+  const html = tableHtml({ columns, groupBy: "department", rows, sort: { key: "name", dir: "asc" } });
+
+  // aria-sort is on the sorted column only, and it says the direction rather than showing an arrow.
+  assert.equal([...html.matchAll(/aria-sort="ascending"/g)].length, 1);
+  assert.match(html, /<th scope="col" class="" aria-sort="ascending"><button[^>]*>Name<svg class="caret"/);
+  assert.match(html, /<th scope="col" class=""><button[^>]*>Department<\/button><\/th>/);
+
+  // Rows are ordered inside each heading, and the headings keep the report's own order — sorting
+  // by name must not also reshuffle the departments.
+  const body = html.slice(html.indexOf("<tbody>"));
+  assert.deepEqual([...body.matchAll(/<tr class="grp"><td colspan="2">([^<]*)<\/td><\/tr>/g)].map(([, g]) => g),
+    ["Ops (2)", "Security (1)"]);
+  // The name column is the second cell of a data row.
+  assert.deepEqual([...body.matchAll(/<tr><td class="">[^<]*<\/td><td class="">([^<]*)<\/td><\/tr>/g)].map(([, n]) => n),
+    ["Ada", "Zara", "Yusuf"]);
+
+  // The descending caret and aria value follow the direction.
+  const desc = tableHtml({ columns, groupBy: null, rows, sort: { key: "name", dir: "desc" } });
+  assert.match(desc, /aria-sort="descending"/);
+  assert.match(desc, /class="caret"/);
+});
+
+test("tableHtml only claims a sort it was asked for", () => {
+  const columns = [{ key: "name", label: "Name" }];
+  const rows = [{ name: "B" }, { name: "A" }];
+  // Asking to sort by a column the table does not have leaves every header unsorted and the rows
+  // in the order they arrived, rather than tearing the table.
+  const html = tableHtml({ columns, groupBy: null, rows, sort: { key: "gone", dir: "asc" } });
+  assert.equal(html.includes("aria-sort"), false);
+  assert.equal([...html.matchAll(/class="caret"/g)].length, 0);
 });

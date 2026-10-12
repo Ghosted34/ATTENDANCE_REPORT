@@ -9,9 +9,9 @@ import { normalizeParams, periodColumnsFor, periodParams, periodSubtitle, runPer
 // Absent rows have no swipe, so no card, entry or duration columns: who the person is, where they
 // work, and — through the shared period columns — the date and its weekday.
 const COLUMNS = [
-  { key: "name", label: "Name" },
-  { key: "idNumber", label: "Employee ID" },
-  { key: "department", label: "Department" },
+  { key: "name", label: "Name", minWidth: 150 },
+  { key: "idNumber", label: "Employee ID", minWidth: 80 },
+  { key: "department", label: "Department", minWidth: 120 },
 ];
 
 /** The same period columns as the attendance report: Date for a range or month, Day for every period. */

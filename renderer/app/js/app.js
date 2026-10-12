@@ -193,9 +193,13 @@ function loginView() {
 }
 
 function homeView() {
+  const list = reportList.map((r) =>
+    `<a href="#/reports/${r.id}"><strong>${esc(r.title)}</strong><span class="muted">${esc(r.description)}</span></a>`).join("");
   view.innerHTML = `<main><h1>Reports</h1><p class="muted">Choose a report to run.</p>
-    <div class="list">${reportList.map((r) =>
-      `<a href="#/reports/${r.id}"><strong>${esc(r.title)}</strong><span class="muted">${esc(r.description)}</span></a>`).join("")}</div></main>`;
+    ${list ? `<div class="list">${list}</div>` : `<div class="empty" role="status">
+      <h3>No reports are available</h3>
+      <p>This build registered none. Check the server log for a report that failed to load.</p>
+    </div>`}</main>`;
 }
 
 function reportView(id) {
@@ -241,7 +245,7 @@ function reportView(id) {
         ${modeSelect}
       </div>
       ${paramFieldsHtml(r, values, { omit: ["mode"] })}
-      <button class="btn primary" id="runBtn">
+      <button class="btn primary" id="runBtn" aria-keyshortcuts="Control+Enter" data-tooltip="Run report (Ctrl+Enter)">
         <span id="runBtnText">Run report</span>
         <span id="runBtnSpinner" class="spinner hidden"></span>
       </button>
@@ -256,7 +260,7 @@ function reportView(id) {
         ${groupByToggleHtml(useGroupBy)}
       </div>
     </form>
-    <div class="table-wrap hidden" id="out" role="region" aria-live="polite"></div>
+    <div class="table-wrap hidden" id="out" role="region" aria-label="Report results"></div>
     <div id="resultsInfo" class="hidden"></div>
     <div id="progressBar" class="progress hidden"><i id="progressInner"></i></div></main>`;
 
@@ -334,14 +338,8 @@ function reportView(id) {
       currentGroupBy = groupBy;
       window.toggleGroupBy();
 
-      // Re-render table if results are visible
-      if (!out.classList.contains('hidden') && latestRows.length > 0) {
-        const cols = latestColumns.length ? latestColumns : r.columns;
-        const summary = computeSummary(latestRows, currentGroupBy ? r.groupBy : null);
-        const summaryText = formatSummary(summary);
-        setMsg(`${latestSubtitle} \u00b7 ${summaryText}`);
-        out.innerHTML = tableHtml({ columns: cols, groupBy: currentGroupBy ? r.groupBy : null, rows: latestRows, statusPill });
-      }
+      // Re-render through the one path, so the summary and sort caption stay in step
+      if (!out.classList.contains("hidden") && latestRows.length > 0) renderTable();
     });
   }
 
@@ -398,6 +396,46 @@ function reportView(id) {
   let latestRows = [];
   let latestColumns = [];
   let latestSubtitle = "";
+  let currentSort = null;
+
+  /** The short name of the column the table is ordered by, for the status line. */
+  const sortCaption = () => {
+    if (!currentSort) return "";
+    const column = latestColumns.find((c) => c.key === currentSort.key);
+    return column ? ` \u00b7 Sorted by ${column.label}, ${currentSort.dir === "desc" ? "descending" : "ascending"}` : "";
+  };
+
+  /**
+   * Draws the table from the rows already in hand. Both switches that change the view without
+   * re-running the report — Grouped/Flat and a header click — come through here, so the table,
+   * the summary and the sort caption cannot disagree about what is on screen.
+   */
+  const renderTable = () => {
+    if (!latestRows.length) return;
+    const cols = latestColumns.length ? latestColumns : r.columns;
+    // A sort survives a change of period, but not the disappearance of its column.
+    const sort = currentSort && cols.some((c) => c.key === currentSort.key) ? currentSort : null;
+    currentSort = sort;
+    const summary = computeSummary(latestRows, currentGroupBy ? r.groupBy : null);
+    setMsg(`${latestSubtitle} · ${formatSummary(summary)}${sortCaption()}`);
+    out.classList.remove("hidden");
+    out.innerHTML = tableHtml({
+      columns: cols, groupBy: currentGroupBy ? r.groupBy : null, rows: latestRows, statusPill, sort,
+    });
+  };
+
+  // A click on any header orders the table by that column: ascending, descending, then back to
+  // the report's own order, which is what the third click is for. The listener is on the
+  // container, so it survives every re-render of the table inside it.
+  out.addEventListener("click", (e) => {
+    const button = e.target.closest("[data-sort-key]");
+    if (!button) return;
+    const key = button.dataset.sortKey;
+    if (!currentSort || currentSort.key !== key) currentSort = { key, dir: "asc" };
+    else if (currentSort.dir === "asc") currentSort = { key, dir: "desc" };
+    else currentSort = null;
+    renderTable();
+  });
 
   form.onsubmit = async (e) => {
     e.preventDefault();
@@ -431,13 +469,6 @@ function reportView(id) {
       latestColumns = cols;
       latestSubtitle = subtitle;
 
-      // Compute summary
-      const summary = computeSummary(rows, currentGroupBy ? r.groupBy : null);
-      const summaryText = formatSummary(summary);
-
-      // Update message with summary
-      setMsg(`${subtitle} \u00b7 ${summaryText}`);
-
       // Hide loading state
       progressBar.classList.add("hidden");
       runBtn.disabled = false;
@@ -445,8 +476,7 @@ function reportView(id) {
       runBtnSpinner.classList.add("hidden");
 
       if (rows.length) {
-        out.classList.remove("hidden");
-        out.innerHTML = tableHtml({ columns: cols, groupBy: currentGroupBy ? r.groupBy : null, rows, statusPill });
+        renderTable(); // sets the summary line and draws the table
         exportGroup.querySelectorAll("[data-x]").forEach((b) => (b.disabled = false));
       } else {
         showEmpty();
@@ -489,7 +519,7 @@ function reportView(id) {
       });
       a.click(); URL.revokeObjectURL(a.href);
       saved = true;
-      setOk(`Saved ${label} file to Downloads.`);
+      setOk(`Saved ${label} file.`);
     } catch (err) { setMsg(err.message, "err"); }
     b.disabled = false;
     if (!saved) { b.textContent = label; return; }

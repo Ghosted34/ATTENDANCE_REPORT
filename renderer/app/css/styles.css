@@ -26,7 +26,9 @@
   /* Text / Ink */
   --ink-1: #1b2430;
   --ink-2: #5d6b7c;
-  --ink-3: #93a1b1;
+  /* Non-text only (icons, separators, disabled marks): clears the 3:1 floor on every surface,
+     and is deliberately not readable enough to carry words — use --ink-2 for those. */
+  --ink-3: #7e8c9a;
 
   /* Accent (teal) */
   --accent: #0f766e;
@@ -36,7 +38,7 @@
   /* Status colors */
   --ok: #0f766e;
   --ok-soft: #e6f4f1;
-  --warn: #d97706;
+  --warn: #a04a08;
   --warn-soft: #fef3c7;
   --danger: #b42318;
   --danger-soft: #fee2e2;
@@ -82,12 +84,6 @@
   --header-height: 48px;
   --toolbar-height: 56px;
 
-  /* Legacy compatibility */
-  --bg: var(--canvas);
-  --ink: var(--ink-1);
-  --muted: var(--ink-2);
-  --head: var(--surface-2);
-  --danger: var(--danger);
 }
 
 [data-theme="dark"] {
@@ -103,7 +99,8 @@
   /* Text / Ink */
   --ink-1: #e6ebf0;
   --ink-2: #93a1b1;
-  --ink-3: #5d6b7c;
+  /* Non-text only: clears 3:1 on every surface in this theme. See the light theme. */
+  --ink-3: #6e7b8b;
 
   /* Accent (teal - lighter for dark mode) */
   --accent: #2dd4bf;
@@ -201,7 +198,7 @@ h2, .text-section {
 
 .text-hint {
   font-size: var(--text-hint);
-  color: var(--ink-3);
+  color: var(--ink-2);
 }
 
 .text-meta {
@@ -421,7 +418,7 @@ textarea {
 
 .field .hint {
   font-size: var(--text-hint);
-  color: var(--ink-3);
+  color: var(--ink-2);
   margin-top: var(--sp-1);
 }
 
@@ -474,6 +471,7 @@ textarea {
   position: relative;
   max-width: none;
   min-height: calc(100vh - var(--header-height));
+  min-height: calc(100dvh - var(--header-height));
   display: flex;
   flex-direction: column;
   padding: var(--sp-8) var(--sp-4);
@@ -603,7 +601,7 @@ textarea {
 .auth-version {
   text-align: center;
   font-size: var(--text-meta);
-  color: var(--ink-3);
+  color: var(--ink-2);
 }
 
 .auth-note code {
@@ -652,6 +650,14 @@ main {
   max-width: 1100px;
   margin: 0 auto;
   padding: var(--sp-6) var(--sp-4);
+}
+
+/* The report page fills the window so its table can be the flexible row. */
+main.report {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - var(--header-height));
+  min-height: calc(100dvh - var(--header-height));
 }
 
 /* Breadcrumb */
@@ -882,8 +888,11 @@ main {
   border-radius: var(--radius-lg);
   background: var(--surface);
   overflow: auto;
-  max-height: calc(100vh - 260px);
   position: relative;
+  /* Fills whatever the header, toolbar and summary leave behind, so the page itself never
+     scrolls: `min-height: 0` is what lets a flex child shrink to its share. */
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 /* Density support */
@@ -945,6 +954,50 @@ th.right,
 td.right {
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+/* Sortable headers. The button fills the cell so the whole header is the target, and the caret
+   only appears on the column the table is ordered by — with `aria-sort` saying so in words. */
+th .th-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  width: 100%;
+  margin: 0 calc(-1 * var(--sp-3));
+  padding: 0 var(--sp-3);
+  height: var(--table-row-height);
+  border: 0;
+  background: none;
+  font: inherit;
+  font-weight: 600;
+  color: inherit;
+  cursor: pointer;
+  text-align: inherit;
+  font-variant-numeric: inherit;
+}
+
+th.right .th-sort {
+  justify-content: flex-end;
+}
+
+th .th-sort:hover {
+  color: var(--accent);
+}
+
+/* The caret is decoration; the sort state itself is on the th's aria-sort. */
+th .th-sort .caret {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  opacity: 0;
+}
+
+th[aria-sort] .th-sort {
+  color: var(--accent);
+}
+
+th[aria-sort] .th-sort .caret {
+  opacity: 1;
 }
 
 /* Wrapping columns */
@@ -1052,25 +1105,6 @@ td:not(.wrap):not(:first-child) {
 }
 
 /* Fixed column widths */
-th:nth-child(1), td:nth-child(1) { min-width: 80px; } /* Date/Day */
-th:nth-child(2), td:nth-child(2) { min-width: 80px; } /* Day/Date */
-th:nth-child(3), td:nth-child(3) { min-width: 150px; } /* Name */
-th:nth-child(4), td:nth-child(4) { min-width: 80px; } /* ID */
-th:nth-child(5), td:nth-child(5) { min-width: 120px; } /* Department */
-th:nth-child(6), td:nth-child(6) { min-width: 80px; } /* Status */
-th:nth-child(7), td:nth-child(7) { min-width: 80px; } /* Card */
-th:nth-child(8), td:nth-child(8) { min-width: 80px; } /* First entry */
-th:nth-child(9), td:nth-child(9) { min-width: 80px; } /* Last entry */
-th:nth-child(10), td:nth-child(10) { min-width: 80px; } /* Duration */
-th:nth-child(11), td:nth-child(11) { min-width: 60px; } /* Swipes */
-
-/* Empty state */
-.empty {
-  padding: var(--sp-16) var(--sp-4);
-  text-align: center;
-  color: var(--ink-3);
-  background: var(--surface);
-}
 
 .empty svg {
   width: 48px;
@@ -1086,7 +1120,7 @@ th:nth-child(11), td:nth-child(11) { min-width: 60px; } /* Swipes */
 }
 
 .empty p {
-  color: var(--ink-3);
+  color: var(--ink-2);
   font-size: var(--text-body);
 }
 
@@ -1189,7 +1223,7 @@ th:nth-child(11), td:nth-child(11) { min-width: 60px; } /* Swipes */
 .placeholder {
   padding: var(--sp-16) var(--sp-4);
   text-align: center;
-  color: var(--ink-3);
+  color: var(--ink-2);
   background: var(--surface);
   border: 1px dashed var(--line);
   border-radius: var(--radius-lg);
@@ -1209,7 +1243,7 @@ th:nth-child(11), td:nth-child(11) { min-width: 60px; } /* Swipes */
 }
 
 .placeholder p {
-  color: var(--ink-3);
+  color: var(--ink-2);
   font-size: var(--text-body);
 }
 
@@ -1417,13 +1451,11 @@ th:nth-child(11), td:nth-child(11) { min-width: 60px; } /* Swipes */
    PERFORMANCE OPTIMIZATIONS
    ============================================================================ */
 
-/* Use content-visibility for large tables */
+/* A month can be thousands of rows, so the browser is asked to skip the rows it cannot see.
+   This is a hint, not a guarantee: containment does not apply to table internals in every
+   engine, and `will-change: transform` — which used to be here — is the opposite of a help, as
+   it asks for a compositing layer per row. */
 .table-wrap tbody {
   content-visibility: auto;
-  contain-intrinsic-size: 1000px 500px;
-}
-
-/* Optimize row rendering */
-tbody tr {
-  will-change: transform;
+  contain-intrinsic-size: auto 1000px;
 }

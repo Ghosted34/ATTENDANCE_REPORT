@@ -9,16 +9,25 @@ Reports Desk uses a clean, tool-grade design inspired by Linear and Vercel dashb
 - **Dense but calm:** Monochrome palette with a single teal accent color (#0f766e light / #2dd4bf dark)
 - **Precise typography:** System font stack with deliberate scale (11px-22px) using only 400/500/600 weights
 - **Subtle hierarchy:** 1px borders instead of shadows, 4-8px radii, minimal elevation
-- **Table craft:** Sticky header and frozen first column, subtle zebra striping (3-5% tint), row hover states, tabular-numeric alignment for numbers
+- **Table craft:** Sticky header and frozen first column, subtle zebra striping (3-5% tint), row hover states, tabular-numeric alignment for numbers, and a **sortable header** on every column — click once for ascending, twice for descending, a third time for the report's own order. Sorting orders the rows inside each department heading, and the status line says which way round it is
+- **Column widths travel with the column:** each column in a report definition carries its own `minWidth`, rather than a stylesheet guessing from its position in the table
 - **Status without color:** Present/Absent shown as small pills with inline SVG icons plus text labels
 - **One switch per choice:** The period is a segmented control (Single date / Date range / Month) that mirrors the report's own `mode` field, and the table is switched between **By Dept** and **All Together** from the toolbar with icons and tooltips
 - **States:** Clear not-run, running (with progress bar and spinner), empty, and error states — the empty state names the period that came back empty and offers the next step (**Try Absentees** carries the same window across, **Change Date**/Change Month returns to the field)
 - **Exports that confirm:** A saved Excel, CSV or PDF file answers with a checkmark in the header and on the button itself
 - **Density toggle:** Comfortable (40px) or compact (32px) row heights from the top bar, persisted via cookie
 - **Sign in:** One card carrying the product mark and name, a reveal control on the password, a button that reports progress instead of going quiet, and one error that marks both fields and clears as soon as the user starts fixing it
-- **Accessibility:** WCAG 2.2 AA compliant with proper focus rings, aria-live regions, table semantics (caption, scope attributes)
+- **Accessibility:** WCAG 2.2 AA, and the contrast is *computed* rather than claimed — `test/ui.test.js` reads the tokens out of the stylesheet and fails if any token that carries words drops below 4.5:1, or if the non-text token (`--ink-3`, used for icons and separators only) drops below 3:1. Focus rings, `aria-sort` on the sorted column, and table semantics (a `caption` naming the table, `scope` on every header, no duplicate label)
 
 All styling uses semantic design tokens defined in `renderer/app/css/styles.css` for both light and dark themes.
+
+The app icon is drawn from the brand's own geometry rather than checked in by hand:
+
+```bash
+node assets/make-icon.mjs      # rewrites assets/icon.png (512x512) from the shield mark
+```
+
+`electron-builder.json` points at `assets/icon.png`, so the installer, the taskbar entry and the packaged app all carry the same shield that the top bar and the sign-in card draw. A development run (`npm start`) still shows the stock Electron icon, which is normal — the icon is baked in when the app is packaged.
 
 ## Requirements
 
