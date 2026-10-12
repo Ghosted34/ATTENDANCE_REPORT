@@ -33,6 +33,24 @@ test("the product mark is one definition, used by the top bar and the sign-in ca
     "and neither of them inlines its own copy");
 });
 
+test("every CSS custom property reference has a definition", () => {
+  const refs = new Set([...cssRules.matchAll(/var\((--[\w-]+)/g)].map(([, name]) => name));
+  const defs = new Set([...cssRules.matchAll(/(--[\w-]+)\s*:/g)].map(([, name]) => name));
+  assert.deepEqual([...refs].filter((name) => !defs.has(name)), [],
+    "a missing spacing or color token silently drops a whole declaration");
+});
+
+test("the workspace and long-result pagination have dedicated, responsive styles", () => {
+  assert.match(cssRules, /\.home-hero\s*\{/);
+  assert.match(cssRules, /\.report-card:hover\s*\{/);
+  assert.match(cssRules, /\.toolbar-filters\s*\{/);
+  assert.match(cssRules, /\.table-footer\s*\{/);
+  assert.match(cssRules, /\.page-button:disabled\s*\{/);
+  assert.match(cssRules, /@media\s*\(max-width:\s*480px\)/);
+  assert.match(cssRules, /\.table-footer\s*,[\s\S]*?display:\s*none\s*!important/,
+    "the pagination chrome stays out of print");
+});
+
 /* ---------- Contrast, computed rather than claimed ---------- */
 
 // The README says WCAG 2.2 AA. That is a number, so it is checked as one: the tokens are read out

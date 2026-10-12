@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   csvFor, emptyStateHtml, escapeHtml, exportFileName, groupByToggleHtml, isoToday,
   paramFieldsHtml, parseQuery, resolveReportParams, sortRows, tableHtml, viewStateOf,
-  visibleColumns, withViewState, VIEW_KEYS,
+  visibleColumns, withViewState, VIEW_KEYS, paginateRows, PAGE_SIZES, DEFAULT_PAGE_SIZE,
 } from "../renderer/app/js/template.js";
 
 const report = {
@@ -257,6 +257,39 @@ test("sortRows orders by the column's own kind and leaves the blanks at the bott
   assert.deepEqual(sortRows(ties, { key: "k", dir: "asc" }).map((r) => r.n), ["first", "second"]);
 });
 
+test("pagination sorts before slicing, preserves grouped order and clamps invalid pages", () => {
+  const rows = [
+    { department: "Ops", name: "Zara" },
+    { department: "Ops", name: "Ada" },
+    { department: "Security", name: "Yusuf" },
+    { department: "Security", name: "Ben" },
+    { department: "Front desk", name: "Chi" },
+  ];
+  const page = paginateRows(rows, {
+    page: 2, pageSize: 2, groupBy: "department", sort: { key: "name", dir: "asc" },
+  });
+  assert.deepEqual(page.rows.map((row) => row.name), ["Ben", "Yusuf"]);
+  assert.equal(page.page, 2);
+  assert.equal(page.pageSize, 2);
+  assert.equal(page.totalRows, 5);
+  assert.equal(page.totalPages, 3);
+  assert.equal(page.startIndex, 2);
+  assert.equal(page.groupCounts.get("Security"), 2);
+
+  // A section that crosses the page boundary still reports its full count in both views.
+  const securityPage = paginateRows(rows, { page: 2, pageSize: 2, groupBy: "department" });
+  const html = tableHtml({
+    columns: [{ key: "name", label: "Name" }, { key: "department", label: "Department" }],
+    groupBy: "department", rows: securityPage.rows, groupCounts: securityPage.groupCounts,
+  });
+  assert.match(html, /Security \(2\)/);
+
+  assert.equal(paginateRows(rows, { page: 999, pageSize: 2 }).page, 3);
+  assert.equal(paginateRows(rows, { page: 0, pageSize: 2 }).page, 1);
+  assert.equal(paginateRows(rows, { page: 2, pageSize: 0 }).pageSize, DEFAULT_PAGE_SIZE);
+  assert.deepEqual(paginateRows([], { page: 4 }).rows, []);
+});
+
 test("tableHtml carries min-width on the column it belongs to, not on a position", () => {
   const columns = [
     { key: "name", label: "Name", minWidth: 150 },
@@ -316,26 +349,35 @@ test("tableHtml only claims a sort it was asked for", () => {
 });
 
 test("the view state rides in the query string without disturbing the window", () => {
-  // A view someone can bookmark: which column it is sorted by, and whether rows are grouped.
-  assert.deepEqual(viewStateOf("?sort=name&dir=desc&group=flat"), { sort: { key: "name", dir: "desc" }, groupBy: false });
-  assert.deepEqual(viewStateOf("?sort=name&dir=asc&group=grouped"), { sort: { key: "name", dir: "asc" }, groupBy: true });
-  // Nothing said is not the same as "false".
-  assert.deepEqual(viewStateOf(""), { sort: null, groupBy: null });
-  assert.deepEqual(viewStateOf("?sort=name"), { sort: null, groupBy: null }, "a key without a direction is not a sort");
-  assert.deepEqual(viewStateOf("?sort=name&dir=sideways"), { sort: null, groupBy: null });
-  assert.deepEqual(viewStateOf("?group=sideways"), { sort: null, groupBy: null });
+  // A view someone can bookmark: sort, grouping and a page of results.
+  assert.deepEqual(viewStateOf("?sort=name&dir=desc&group=flat&page=3&pageSize=25"), {
+    sort: { key: "name", dir: "desc" }, groupBy: false, page: 3, pageSize: 25,
+  });
+  assert.deepEqual(viewStateOf("?sort=name&dir=asc&group=grouped"), {
+    sort: { key: "name", dir: "asc" }, groupBy: true, page: null, pageSize: null,
+  });
+  // Nothing said is not the same as "false". Invalid or out-of-range view keys are ignored.
+  assert.deepEqual(viewStateOf(""), { sort: null, groupBy: null, page: null, pageSize: null });
+  assert.deepEqual(viewStateOf("?sort=name"), { sort: null, groupBy: null, page: null, pageSize: null }, "a key without a direction is not a sort");
+  assert.deepEqual(viewStateOf("?sort=name&dir=sideways"), { sort: null, groupBy: null, page: null, pageSize: null });
+  assert.deepEqual(viewStateOf("?group=sideways&page=1&pageSize=500"), { sort: null, groupBy: null, page: null, pageSize: null });
 
   // Writing the view keeps whatever the link already said about the window.
   assert.equal(withViewState("?mode=range&start=2026-10-05&end=2026-10-07", { sort: { key: "name", dir: "asc" }, groupBy: true }),
     "?mode=range&start=2026-10-05&end=2026-10-07&sort=name&dir=asc&group=grouped");
   // Changing it replaces rather than appends, so the address does not grow with every click.
-  assert.equal(withViewState("?mode=range&sort=name&dir=asc&group=grouped", { sort: { key: "department", dir: "desc" }, groupBy: false }),
-    "?mode=range&sort=department&dir=desc&group=flat");
+  assert.equal(withViewState("?mode=range&sort=name&dir=asc&group=grouped&page=9&pageSize=25", {
+    sort: { key: "department", dir: "desc" }, groupBy: false, page: 2, pageSize: 50,
+  }), "?mode=range&sort=department&dir=desc&group=flat&page=2&pageSize=50");
+  // A non-default page size is kept even on the first page; page 1 itself is implicit.
+  assert.equal(withViewState("?mode=month&page=8&pageSize=100", { page: 1, pageSize: 25 }),
+    "?mode=month&pageSize=25");
   // Clearing it takes the keys out and leaves the window alone.
-  assert.equal(withViewState("?mode=month&month=2026-10&sort=name&dir=asc", {}), "?mode=month&month=2026-10");
+  assert.equal(withViewState("?mode=month&month=2026-10&sort=name&dir=asc&page=2&pageSize=25", {}), "?mode=month&month=2026-10");
   assert.equal(withViewState("", {}), "", "an empty view is an empty query, not a bare question mark");
-  // The three keys are the whole vocabulary, and they are the ones kept out of report requests.
-  assert.deepEqual([...VIEW_KEYS], ["sort", "dir", "group"]);
+  assert.deepEqual([...VIEW_KEYS], ["sort", "dir", "group", "page", "pageSize"]);
+  assert.deepEqual([...PAGE_SIZES], [25, 50, 100]);
+  assert.equal(DEFAULT_PAGE_SIZE, 50);
 });
 
 test("hiding columns can never empty the table", () => {

@@ -4,25 +4,21 @@ Attendance Reports runs in two modes: a standalone local web server opened in yo
 
 ## Look and feel
 
-Reports Desk uses a clean, tool-grade design inspired by Linear and Vercel dashboards:
+Reports Desk is built as a polished, practical reporting workspace:
 
-- **Dense but calm:** Monochrome palette with a single teal accent color (#0f766e light / #2dd4bf dark)
-- **Precise typography:** System font stack with deliberate scale (11px-22px) using only 400/500/600 weights
-- **Subtle hierarchy:** 1px borders instead of shadows, 4-8px radii, minimal elevation
-- **Table craft:** Sticky header and frozen first column, with a **sticky department heading** — scrolling a 31-day grouped report keeps the section you are reading named under the header — subtle zebra striping (3-5% tint), row hover states, tabular-numeric alignment for numbers, and a **sortable header** on every column — click once for ascending, twice for descending, a third time for the report's own order. Sorting orders the rows inside each department heading, and the status line says which way round it is
-- **Column widths travel with the column:** each column in a report definition carries its own `minWidth`, rather than a stylesheet guessing from its position in the table
-- **Status without color:** Present/Absent shown as small pills with inline SVG icons plus text labels
-- **The view is in the address:** Which column the table is sorted by, whether rows are grouped, and the window the report was last run with all travel in the app's own address — `#/reports/attendance?mode=range&start=2026-10-05&end=2026-10-07&sort=name&dir=asc&group=grouped`. A reload keeps the view, and the address can be pasted into a message to hand someone the same one. The view keys are taken out before the window is sent to the report, so a report is asked about a window and not about a sort
-- **A report remembers its window:** the dates (or month, or day) a report was last run with are stored per report and offered again next time, so reopening *Absentees* does not silently start over at today. `#/reports/absentees` reopens the day that was last run; a link that names a date still wins
-- **Columns can be hidden:** the **Columns** button in the toolbar lists the columns the run actually has and switches them off one at a time — handy at the 900px minimum window, where eleven columns are cramped. The last visible column cannot be switched off, the choice is remembered per report, and exports and PDFs still carry every column
-- **Keyboard, not just mouse:** both segmented controls are a radio group — one stop in the tab order (the option that is on), with **Left/Right** or **Up/Down** moving between options, **Home/End** jumping to the ends, and Escape closing the Columns panel and returning focus to its button
-- **One switch per choice:** The period is a segmented control (Single date / Date range / Month) that mirrors the report's own `mode` field, and the table is switched between **By Dept** and **All Together** from the toolbar with icons and tooltips
-- **States:** Clear not-run, running (with progress bar and spinner), empty, and error states — the empty state names the period that came back empty and offers the next step (**Try Absentees** carries the same window across, **Change Date**/Change Month returns to the field)
-- **Exports that confirm, and match the screen:** A saved Excel, CSV or PDF file answers with a checkmark in the header and on the button itself, and comes out **in the order the table was sorted** — the sort travels with the request and the server applies the same comparator, ordering the rows inside each section exactly as the table does. The viewport, the file, and the printed sheet cannot disagree
-- **Focus follows navigation:** Because this is a single page, each navigation hands focus to the new page's heading, so a keyboard user is never left on a link that has been replaced. The window title names the report, not just the product
-- **Density toggle:** Comfortable (40px) or compact (32px) row heights from the top bar, persisted via cookie
-- **Sign in:** One card carrying the product mark and name, a reveal control on the password, a button that reports progress instead of going quiet, and one error that marks both fields and clears as soon as the user starts fixing it
-- **Accessibility:** WCAG 2.2 AA, and the contrast is *computed* rather than claimed — `test/ui.test.js` reads the tokens out of the stylesheet and fails if any token that carries words drops below 4.5:1, or if the non-text token (`--ink-3`, used for icons and separators only) drops below 3:1. Focus rings, `aria-sort` on the sorted column, and table semantics (a `caption` naming the table, `scope` on every header, no duplicate label)
+- **A clear workspace:** The home screen has a confident page header, a live report count and clickable report cards with distinct visual cues. The report screen gives filters, view controls and exports their own deliberate zones instead of crowding them into one row.
+- **A calm, legible palette:** Cool slate surfaces, crisp white cards and a restrained teal accent in light mode; the same hierarchy is carried through the dark theme. Typography and spacing scale up for comfortable reading, with restrained shadows and consistent corner radii.
+- **Table craft:** Sticky header and frozen first column, with a **sticky department heading** — scrolling a 31-day grouped report keeps the section you are reading named under the header — subtle zebra striping, row hover states, tabular-numeric alignment, and a sortable header on every column. Click once for ascending, twice for descending, a third time for the report's own order. Sorting orders the rows inside each department heading.
+- **Pagination for long reports:** Results show 50 rows per page by default, with 25/50/100 choices, a visible row range, and previous/next controls. Only the current page is drawn into the table, making long month views easier to navigate and lighter on the DOM. The page and page size are kept in the report URL; grouped section headings retain their full counts when a section crosses a page. Pagination is client-side, while Excel/CSV/PDF exports continue to include the full report.
+- **Column widths travel with the column:** each column in a report definition carries its own `minWidth`, rather than a stylesheet guessing from its position in the table.
+- **Present/Absent at a glance:** Status pills use distinct colors, inline SVG symbols and text labels.
+- **The view is in the address:** Sort, grouping, pagination and the report window travel in the app's own address — for example `#/reports/attendance?mode=range&start=2026-10-05&end=2026-10-07&sort=name&dir=asc&group=grouped&page=2&pageSize=50`. Opening a link restores the controls and requested page; click **Run report** to fetch its rows again. Presentation keys are taken out before a report request is sent.
+- **A report remembers its window:** The dates (or month, or day) a report was last run with are stored per report and offered again next time, so reopening *Absentees* does not silently start over at today. A link that names a date still wins.
+- **Columns can be hidden:** The **Visible columns** menu lists the columns the run actually has. The last visible column cannot be switched off, the choice is remembered per report, and exports still carry every column.
+- **Keyboard and accessibility:** Segmented controls support arrow keys and Home/End; Escape closes the Columns panel and returns focus. Navigation hands focus to the new heading. Tables retain captions, scoped headers and `aria-sort`; pagination controls have accessible names and announce the visible row range. `test/ui.test.js` computes contrast from the actual light/dark tokens and checks the WCAG AA text and non-text thresholds.
+- **Thoughtful states:** Not-run, running, empty and error states give clear feedback and next steps. Exports confirm when saved; sort order matches the screen, and all file formats include every report row and column.
+- **Density toggle:** Comfortable (40px) or compact (32px) row heights from the top bar, persisted via cookie. Theme selection is remembered too.
+- **Sign in:** A focused card with the shared product mark, password reveal, Caps Lock warning, clear attempt feedback and a subtle development-build badge. The default account is not advertised in the UI.
 
 All styling uses semantic design tokens defined in `renderer/app/css/styles.css` for both light and dark themes.
 
@@ -214,10 +210,12 @@ Electron used to hand the report to Chromium as a `data:text/html;charset=utf-8,
 **Manual check** (the Electron runtime is not part of the test suite, so the desktop half is verified by hand on a machine that can run `npm start`):
 
 1. Start the desktop app against a database you can print from, and run a period big enough to have failed before — a **Month** with absentees, or a date range of a few thousand rows.
-2. Press **PDF**. The save dialog opens and the file is written; no error dialog, and nothing about `ERR_INVALID_URL` or `-300` in the log.
-3. Open the PDF: every row is there (the total in the header matches the `Total` line on screen), the footer shows the report title, its window, the brand and *Page x of y*, and the pages are A4 landscape.
-4. Repeat with a single date, to confirm the small reports still print.
-5. Confirm no `reports-desk-print-*` folder is left in the temp directory (`%TEMP%` on Windows, `$TMPDIR` elsewhere) after printing, and none after deliberately failing a print (for example by cancelling the save dialog).
+2. Move between pages, change the page size, then sort and toggle grouping. The row range and page indicator should stay in sync; page state should appear in the address.
+3. Export CSV/Excel/PDF from a later page and confirm the files still contain the **full report**, not only the visible page.
+4. Press **PDF**. The save dialog opens and the file is written; no error dialog, and nothing about `ERR_INVALID_URL` or `-300` in the log.
+5. Open the PDF: every row is there (the total in the header matches the `Total` line on screen), the footer shows the report title, its window, the brand and *Page x of y*, and the pages are A4 landscape.
+6. Repeat with a single date, to confirm the small reports still print.
+7. Confirm no `reports-desk-print-*` folder is left in the temp directory (`%TEMP%` on Windows, `$TMPDIR` elsewhere) after printing, and none after deliberately failing a print (for example by cancelling the save dialog).
 
 ## Local environment variables
 

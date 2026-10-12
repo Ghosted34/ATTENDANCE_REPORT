@@ -17,8 +17,8 @@ import { fileURLToPath } from "node:url";
 
 /* ---------- The mark ---------- */
 
-// The shield, as the `--mark-mask` token has it: "M12 2L2 7v10c0 5.55 3.84 9.74 9 11 5.16-1.26
-// 9-5.45 9-11V7l-10-5z", in its own 24x24 coordinate space.
+// The shield path from the CSS `--mark-mask` token, moved into an 18x20 coordinate space so
+// the installer icon and the in-app marks share the same clean, symmetrical silhouette.
 function shieldPoints(steps = 48) {
   const cubic = (p0, p1, p2, p3, t) => {
     const u = 1 - t;
@@ -27,12 +27,14 @@ function shieldPoints(steps = 48) {
       u * u * u * p0[1] + 3 * u * u * t * p1[1] + 3 * u * t * t * p2[1] + t * t * t * p3[1],
     ];
   };
-  const points = [[12, 2], [2, 7], [2, 17]]; // M, L, v10
-  const left = cubic([2, 17], [2, 22.55], [5.84, 26.74], [11, 28], 0); // c0 5.55 3.84 9.74 9 11
-  for (let i = 0; i <= steps; i++) points.push(cubic([2, 17], [2, 22.55], [5.84, 26.74], [11, 28], i / steps));
-  for (let i = 0; i <= steps; i++) points.push(cubic([11, 28], [16.16, 26.74], [20, 22.55], [20, 17], i / steps));
-  points.push([20, 7], [10, 2]); // V7, l-10-5, z
-  void left;
+  const points = [[9, 0], [0, 4], [0, 10]]; // M, L, v6
+  for (let i = 1; i <= steps; i++) {
+    points.push(cubic([0, 10], [0, 15.1], [3.6, 18.9], [9, 20], i / steps));
+  }
+  for (let i = 1; i <= steps; i++) {
+    points.push(cubic([9, 20], [14.4, 18.9], [18, 15.1], [18, 10], i / steps));
+  }
+  points.push([18, 4], [9, 0]); // V4, L, z
   return points;
 }
 
@@ -62,11 +64,11 @@ const MARK = [0xff, 0xff, 0xff];
 /** RGBA pixels for the icon, 4x supersampled on each axis. */
 function render(size) {
   const shield = shieldPoints();
-  // Fit the 18x26 shield into the tile with a margin, centred.
-  const fill = 0.58;
-  const scale = (size * fill) / 26;
+  // Give the shield a comfortable 68% height, with optical centring on the tile.
+  const fill = 0.68;
+  const scale = (size * fill) / 20;
   const offsetX = (size - 18 * scale) / 2;
-  const offsetY = (size - 26 * scale) / 2;
+  const offsetY = (size - 20 * scale) / 2;
   const toTile = ([x, y]) => [offsetX + x * scale, offsetY + y * scale];
   const mark = shield.map(toTile);
 
