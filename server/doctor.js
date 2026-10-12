@@ -34,7 +34,11 @@ export const EVENT_COLUMNS = Object.freeze(["PeopleID", "CardNumber", "EventCate
  * filters; a catalog without it is reported here, and the report falls back to PeopleID
  * rather than failing the run.
  */
-export const PEOPLE_COLUMNS = Object.freeze(["PeopleID", "EmployeeID", "Firstname", "Lastname", "Department", "IsActive"]);
+// CardNumber is read from dbo.p_people when the catalog reports it (the on-file badge card). It is
+// optional: not every install stores it on p_people, in which case the report falls back to the
+// latest granted card on EventHistory. Keeping it on the allowlist means reading it is an allowed,
+// matched identifier rather than an ad-hoc column.
+export const PEOPLE_COLUMNS = Object.freeze(["PeopleID", "EmployeeID", "Firstname", "Lastname", "Department", "IsActive", "CardNumber"]);
 
 /** Column types as declared in the catalog, grouped the way the report needs them. */
 const DATETIME_TYPES = new Set(["datetime", "datetime2", "smalldatetime"]);
@@ -264,9 +268,9 @@ export async function buildDoctorReport({ config, queryFn = query, today = new D
     return report;
   }
 
-  // EmployeeID is optional: the report falls back to PeopleID, so a missing badge column is a
-  // note, not a failure of the whole people table.
-  const optional = new Set([`${PEOPLE_TABLE}.EmployeeID`]);
+  // EmployeeID and CardNumber are optional: the report falls back to PeopleID for the badge and to
+  // the latest EventHistory card for the on-file card, so a missing column is a note, not a failure.
+  const optional = new Set([`${PEOPLE_TABLE}.EmployeeID`, `${PEOPLE_TABLE}.CardNumber`]);
   for (const [table, columns] of [[EVENT_TABLE, EVENT_COLUMNS], [PEOPLE_TABLE, PEOPLE_COLUMNS]]) {
     const parts = [];
     const missing = [];

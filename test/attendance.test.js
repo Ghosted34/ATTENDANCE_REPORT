@@ -33,13 +33,13 @@ const dbRows = [
 
 // Active employees (IsActive = 1 in the roster query). Ada and Ben swiped in the range above; Chi
 // never did, so Chi is the person the report must list as Absent on every day. Chi's EmployeeID
-// is absent: the column exists, the value does not, the cell stays "—". CardNumber here stands in
-// for the OUTER APPLY's latest granted card on EventHistory — the roster query reads it, so an
-// absent day can still show a card.
+// is absent: the column exists, the value does not, the cell stays "—". PeopleCard stands in for
+// dbo.p_people.CardNumber — the on-file badge card the roster query reads, preferred over the
+// OUTER APPLY's latest EventHistory card, so an absent day still shows a card.
 const roster = [
-  { PeopleID: 7, EmployeeID: "E-1007", Firstname: "Ada", Lastname: "Obi", Department: "Ops", CardNumber: 1234 },
-  { PeopleID: 9, EmployeeID: "E-1009", Firstname: "Ben", Lastname: "Nwosu", Department: "Security", CardNumber: 9876 },
-  { PeopleID: 11, EmployeeID: null, Firstname: "Chi", Lastname: "Eze", Department: "Ops", CardNumber: null },
+  { PeopleID: 7, EmployeeID: "E-1007", Firstname: "Ada", Lastname: "Obi", Department: "Ops", PeopleCard: 1234 },
+  { PeopleID: 9, EmployeeID: "E-1009", Firstname: "Ben", Lastname: "Nwosu", Department: "Security", PeopleCard: 9876 },
+  { PeopleID: 11, EmployeeID: null, Firstname: "Chi", Lastname: "Eze", Department: "Ops", PeopleCard: null },
 ];
 
 // A fixed "now" (12 Oct 2026 09:00 UTC, i.e. 10:00 in Lagos) so the future-day cut-off is stable.
@@ -68,7 +68,10 @@ const fakeQuery = () => {
   const queryFn = async (sql, params) => {
     calls.push({ sql, params });
     if (/IsActive/.test(sql)) return roster;
-    return /INFORMATION_SCHEMA\.COLUMNS/.test(sql) ? [{ kind: "datetime" }] : swipesIn(params);
+    // The catalog answer names the columns it has: time, badge and the on-file card on p_people.
+    return /INFORMATION_SCHEMA\.COLUMNS/.test(sql)
+      ? [{ name: "EventUTCTime", kind: "datetime" }, { name: "EmployeeID", kind: "nvarchar" }, { name: "CardNumber", kind: "int" }]
+      : swipesIn(params);
   };
   return { calls, queryFn };
 };
@@ -676,6 +679,12 @@ test("the roster is the active employees only, by the IsActive flag, and is boun
   assert.match(ROSTER_SQL, /SELECT TOP \(1\) eh\.CardNumber/);
   assert.match(ROSTER_SQL, /ORDER BY eh\.EventUTCTime DESC/);
   assert.doesNotMatch(ROSTER_SQL, /GROUP BY/);
+  // The on-file card on dbo.p_people.CardNumber is read (as PeopleCard) when the catalog reports it,
+  // so an absent day shows the card the person is issued even when no swipe carries one — and the
+  // statement omits the column entirely when the catalog says p_people has no CardNumber.
+  assert.match(ROSTER_SQL, /pp\.CardNumber AS PeopleCard/);
+  const withoutPeopleCard = rosterSqlFor("EmployeeID", "datetime", false);
+  assert.doesNotMatch(withoutPeopleCard, /pp\.CardNumber/);
 });
 
 test("the roster's OUTER APPLY orders by the raw time column for datetime and by TRY_CONVERT for legacy text", () => {
@@ -704,7 +713,7 @@ test("a database without EmployeeID shows and filters PeopleID, and still matche
   assert.deepEqual(await readReportShape(async () => [
     { name: "EmployeeID", kind: "nvarchar" },
     { name: "EventUTCTime", kind: "datetime" },
-  ]), { timeKind: "datetime", identity: "EmployeeID" });
+  ]), { timeKind: "datetime", identity: "EmployeeID", peopleCard: false });
 
   const calls = [];
   const queryFn = async (sql, params) => {
@@ -712,7 +721,7 @@ test("a database without EmployeeID shows and filters PeopleID, and still matche
     if (/INFORMATION_SCHEMA/.test(sql)) return [{ name: "EventUTCTime", kind: "datetime" }];
     const aliased = /AS EmployeeID/.test(sql);
     if (/IsActive/.test(sql)) {
-      assert.equal(sql, rosterSqlFor("PeopleID"));
+      assert.equal(sql, rosterSqlFor("PeopleID", "datetime", false));
       return roster.map((person) => (aliased ? { ...person, EmployeeID: person.PeopleID } : person));
     }
     assert.equal(sql, statementFor("datetime", "PeopleID"));
@@ -730,23 +739,26 @@ test("a database without EmployeeID shows and filters PeopleID, and still matche
 });
 
 test("an absentee with no swipe in the window shows the badge and the known card, and a zero card shows em dash", async () => {
-  // No swipes at all, so everyone is absent; the roster's OUTER APPLY card is what an absent row
-  // shows. Dara has a card on file (4242) and Emeka's card is 0, which is not a usable card.
+  // No swipes at all, so everyone is absent; the on-file p_people.CardNumber is the primary card,
+  // with the EventHistory OUTER APPLY card as the fallback. Dara's file card is 4242 (and a
+  // different EventHistory card 9999, to prove the file card wins); Emeka's file card is 0, which is
+  // not a usable card.
   const people = [
-    { PeopleID: 15, EmployeeID: "E-1015", Firstname: "Dara", Lastname: "Okoro", Department: "Ops", CardNumber: 4242 },
-    { PeopleID: 16, EmployeeID: "E-1016", Firstname: "Emeka", Lastname: "Ude", Department: "Ops", CardNumber: 0 },
+    { PeopleID: 15, EmployeeID: "E-1015", Firstname: "Dara", Lastname: "Okoro", Department: "Ops", PeopleCard: 4242, CardNumber: 9999 },
+    { PeopleID: 16, EmployeeID: "E-1016", Firstname: "Emeka", Lastname: "Ude", Department: "Ops", PeopleCard: 0, CardNumber: null },
   ];
   const queryFn = async (sql) => {
-    if (/INFORMATION_SCHEMA/.test(sql)) return [{ name: "EventUTCTime", kind: "datetime" }, { name: "EmployeeID", kind: "nvarchar" }];
+    if (/INFORMATION_SCHEMA/.test(sql)) return [{ name: "EventUTCTime", kind: "datetime" }, { name: "EmployeeID", kind: "nvarchar" }, { name: "CardNumber", kind: "int" }];
     if (/IsActive/.test(sql)) return people;
     return [];
   };
   const absent = await absentees.run({ date: "2026-10-05" }, { tz: 1, queryFn, now: NOW });
   const dara = absent.find((r) => r.idNumber === "E-1015");
   assert.equal(dara.name, "Okoro Dara");
-  assert.equal(dara.cardNumber, 4242); // the known card on file is shown even with no swipe
+  assert.equal(dara.cardNumber, 4242); // the on-file p_people card is shown even with no swipe
+  assert.equal(dara.idNumber, "E-1015");
   const emeka = absent.find((r) => r.idNumber === "E-1016");
-  assert.equal(emeka.cardNumber, "—"); // a card of 0 is not a card, so the cell stays em dash
+  assert.equal(emeka.cardNumber, "—"); // a file card of 0 is not a card, so the cell stays em dash
   // The same Absentees report agrees with the attendance report's absent rows on both values.
   const attendanceRows = await attendance.run({ date: "2026-10-05" }, { tz: 1, queryFn, now: NOW });
   const daraRow = attendanceRows.find((r) => r.idNumber === "E-1015" && r.status === "Absent");

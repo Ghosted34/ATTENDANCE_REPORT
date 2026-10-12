@@ -334,22 +334,24 @@ WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'EventHistory' AND COLUMN_NAME = 'Ev
  * filter matches pp.EmployeeID (or pp.PeopleID when that column is absent) as trimmed text, the
  * same bound parameter as the swipe statement. PeopleID is still selected: it is the match key.
  */
-export function rosterSqlFor(identity = "EmployeeID", timeKind = "datetime") {
+export function rosterSqlFor(identity = "EmployeeID", timeKind = "datetime", peopleCard = true) {
   const badge = identityExpr(identity);
   // One seek per active person: OUTER APPLY reads each person's latest usable card on EventHistory
-  // and selects it as card.CardNumber. The apply does not change who is eligible
-  // (TRY_CONVERT(int, pp.IsActive) = 1) or how the badge filter is bound; it only adds the known
-  // card so an absent day can still show one. A legacy text time column is read through
-  // TRY_CONVERT(datetime2(3), …) so it cannot raise 241 — the same rule the swipe query uses.
-  // The card lookup is intentionally broader than the swipe ("Present") query: it takes the latest
-  // non-null, non-zero card for the PeopleID whatever event logged it, because some installs record
-  // the card on an event whose description is not 'Access Granted'. Present/Status still come only
-  // from granted swipes, so widening this lookup cannot turn an absence into a presence.
+  // and selects it as card.CardNumber (the fallback when p_people holds no card). When the catalog
+  // reports a dbo.p_people.CardNumber column, that on-file badge card is read too and preferred,
+  // because it is the authoritative card for the person. The apply does not change who is eligible
+  // (TRY_CONVERT(int, pp.IsActive) = 1) or how the badge filter is bound. A legacy text time column
+  // is read through TRY_CONVERT(datetime2(3), …) so it cannot raise 241 — the same rule the swipe
+  // query uses. The card lookup is intentionally broader than the swipe ("Present") query: it takes
+  // the latest non-null, non-zero card for the PeopleID whatever event logged it, because some
+  // installs record the card on an event whose description is not 'Access Granted'. Present/Status
+  // still come only from granted swipes, so widening this lookup cannot turn an absence into a presence.
   const orderBy = timeKind === "datetime"
     ? "eh.EventUTCTime DESC"
     : "TRY_CONVERT(datetime2(3), eh.EventUTCTime) DESC";
+  const peopleCardSelect = peopleCard ? ", pp.CardNumber AS PeopleCard" : "";
   return `
-SELECT pp.PeopleID, ${badgeSelect(identity)}, pp.Firstname, pp.Lastname, pp.Department, card.CardNumber
+SELECT pp.PeopleID, ${badgeSelect(identity)}, pp.Firstname, pp.Lastname, pp.Department, card.CardNumber${peopleCardSelect}
 FROM dbo.p_people AS pp
 OUTER APPLY (
   SELECT TOP (1) eh.CardNumber
@@ -394,6 +396,7 @@ WHERE TABLE_SCHEMA = 'dbo'
   AND (
     (TABLE_NAME = 'EventHistory' AND COLUMN_NAME = 'EventUTCTime')
     OR (TABLE_NAME = 'p_people' AND COLUMN_NAME = 'EmployeeID')
+    OR (TABLE_NAME = 'p_people' AND COLUMN_NAME = 'CardNumber')
   );`;
 
 const timeKindOf = (rows) => {
@@ -412,12 +415,20 @@ const identityOf = (rows, failed) => {
   return list.some((row) => row.name === "EmployeeID") ? "EmployeeID" : "PeopleID";
 };
 
+// Whether dbo.p_people carries a CardNumber column. When it does, that on-file badge card is the
+// primary card source (EventHistory is the fallback); when it does not, the roster query simply does
+// not select the column, so a schema without it is unaffected.
+const peopleCardOf = (rows) => {
+  const list = Array.isArray(rows) ? rows : [];
+  return list.some((row) => row?.name === "CardNumber");
+};
+
 export async function readReportShape(queryFn = query) {
   try {
     const rows = await queryFn(CATALOG_SQL, {});
-    return { timeKind: timeKindOf(rows), identity: identityOf(rows, false) };
+    return { timeKind: timeKindOf(rows), identity: identityOf(rows, false), peopleCard: peopleCardOf(rows) };
   } catch {
-    return { timeKind: "text", identity: "PeopleID" };
+    return { timeKind: "text", identity: "PeopleID", peopleCard: false };
   }
 }
 
@@ -550,11 +561,11 @@ const sortRows = (rows) => rows.sort((a, b) =>
 export async function runPeriod(params, { tz, queryFn = query, now = new Date() } = {}) {
   const normalized = normalizeParams(params);
   const { start, end, idNumber } = normalized;
-  const { timeKind, identity } = await readReportShape(queryFn);
+  const { timeKind, identity, peopleCard } = await readReportShape(queryFn);
   const values = { startYmd: toYmd(start), endYmd: toYmd(end), idNumber: idNumber ?? "", tz };
 
   const swipes = await guard(() => queryFn(statementFor(timeKind, identity), values));
-  const people = await guard(() => queryFn(rosterSqlFor(identity, timeKind), { idNumber: idNumber ?? "" }));
+  const people = await guard(() => queryFn(rosterSqlFor(identity, timeKind, peopleCard), { idNumber: idNumber ?? "" }));
 
   // Absence matches on PeopleID, never on the displayed badge: a blank badge ("—") must not
   // collapse two people into one, and a badge number is not the key the roster shares.
@@ -595,6 +606,9 @@ export async function runPeriod(params, { tz, queryFn = query, now = new Date() 
         name: nameOf(person),
         rosterId: displayId(person.EmployeeID),
         department: person.Department || "Unassigned",
+        // The on-file card from dbo.p_people.CardNumber is preferred; the EventHistory OUTER APPLY
+        // card is the fallback; a card seen on a swipe this run fills a blank of both.
+        peopleCard: usableCard(person.PeopleCard),
         knownCard: usableCard(person.CardNumber),
       });
     }
@@ -618,8 +632,9 @@ export async function runPeriod(params, { tz, queryFn = query, now = new Date() 
   };
   const knownCardFor = (key) => {
     const roster = byKey.get(key);
-    if (roster && roster.knownCard) return roster.knownCard;
-    const seen = seenCard.get(key);
+    if (roster && roster.peopleCard) return roster.peopleCard; // on-file card from p_people.CardNumber
+    if (roster && roster.knownCard) return roster.knownCard;   // latest usable EventHistory card
+    const seen = seenCard.get(key);                             // a card seen on a swipe this run
     if (seen) return seen;
     return "—";
   };
