@@ -30,20 +30,23 @@ test("the report list advertises the mode select, a single-date default and mode
     const report = list.find((r) => r.id === "attendance");
     assert.ok(report, "attendance report is registered");
     const params = Object.fromEntries(report.params.map((p) => [p.name, p]));
-    assert.deepEqual(Object.keys(params), ["mode", "date", "start", "end", "idNumber"]);
+    assert.deepEqual(Object.keys(params), ["mode", "date", "start", "end", "month", "idNumber"]);
     assert.equal(params.mode.type, "select");
     assert.equal(params.mode.default, "single");
-    assert.deepEqual(params.mode.options.map((o) => o.value), ["single", "range"]);
+    assert.deepEqual(params.mode.options.map((o) => o.value), ["single", "range", "month"]);
     assert.equal(params.date.mode, "single");
     assert.equal(params.start.mode, "range");
     assert.equal(params.end.mode, "range");
+    assert.equal(params.month.type, "month");
+    assert.equal(params.month.mode, "month");
     assert.equal(params.idNumber.type, "text");
     assert.equal(params.idNumber.optional, true); // blank means everyone
     assert.equal(report.columns.some((c) => c.key === "date"), false);
     assert.equal(report.columns.some((c) => c.key === "department"), false); // the screen groups by it instead
     assert.deepEqual(report.columns.map((c) => c.label), [
-      "Name", "ID number", "Card no.", "First entry", "Last entry", "Duration", "Swipes",
+      "Name", "Employee ID", "Status", "Card no.", "First entry", "Last entry", "Duration", "Swipes",
     ]);
+    assert.match(report.description, /Absent/);
   });
 });
 
@@ -56,7 +59,14 @@ test("invalid dates and reversed ranges are rejected with 400 before the databas
       ["/api/reports/attendance/data?mode=range&start=2026-10-05&end=2026-02-31", /valid start date and end date/],
       ["/api/reports/attendance/data?mode=range&start=&end=", /valid start date and end date/],
       ["/api/reports/attendance/data?mode=week&date=2026-10-05", /Single date/],
-      ["/api/reports/attendance/data?date=2026-10-05&idNumber=7%20OR%201%3D1", /ID number can only contain/],
+      ["/api/reports/attendance/data?date=2026-10-05&idNumber=7%20OR%201%3D1", /Employee ID can only contain/],
+      ["/api/reports/attendance/data?mode=month&month=2026-13", /valid month/],
+      ["/api/reports/attendance/data?mode=month&month=2026-02-01", /valid month/],
+      ["/api/reports/attendance/data?mode=month", /valid month/],
+      ["/api/reports/attendance/data?mode=range&start=2025-01-01&end=2026-12-31", /at most 366 days/],
+      ["/api/reports/absentees/data?date=2026-02-31", /Pick a valid date/],
+      ["/api/reports/absentees/data?mode=month&month=2026-00", /valid month/],
+      ["/api/reports/absentees/csv?mode=range&start=2026-10-05&end=2026-10-01", /on or before/],
       ["/api/reports/attendance/data", /Pick a valid date/], // no parameters at all
     ];
     for (const [path, message] of cases) {
@@ -166,4 +176,20 @@ test("Electron PDF rendering receives the print template's metadata", async () =
   assert.match(calls[0].html, /<h1>Fixture report<\/h1>/);
   assert.match(calls[0].html, /Fixture for wide · Reports Desk · Total 1/);
   assert.match(calls[0].html, /<th class="">Extra<\/th>/);
+});
+
+test("the absentee report is listed beside attendance, with its own name, columns and the same periods", async () => {
+  await withApi(async ({ get }) => {
+    const list = await (await get("/api/reports")).json();
+    const absentees = list.find((r) => r.id === "absentees");
+    assert.ok(absentees, "absentee report is registered");
+    assert.equal(absentees.title, "Absentees");
+    assert.deepEqual(absentees.params.map((p) => p.name), ["mode", "date", "start", "end", "month", "idNumber"]);
+    assert.deepEqual(absentees.columns.map((c) => c.label), ["Name", "Employee ID"]);
+    assert.equal(absentees.groupBy, "department");
+    // Same period validation as the attendance report, so the two reports take the same inputs.
+    const res = await get("/api/reports/absentees/xlsx?mode=range&start=2026-10-05&end=2026-10-01");
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error, /on or before/);
+  });
 });

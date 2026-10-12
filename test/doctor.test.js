@@ -20,6 +20,7 @@ const DATETIME_TYPES = [
   { tbl: "p_people", name: "Firstname", type: "nvarchar" },
   { tbl: "p_people", name: "Lastname", type: "nvarchar" },
   { tbl: "p_people", name: "Department", type: "nvarchar" },
+  { tbl: "p_people", name: "IsActive", type: "bit" },
 ];
 
 const TEXT_TYPES = DATETIME_TYPES.map((r) => (r.name === "EventUTCTime" ? { ...r, type: "varchar" } : r));
@@ -35,7 +36,7 @@ const TODAY = new Date("2026-10-05T09:00:00Z");
 
 // One row set per statement the doctor is allowed to run; anything else fails the test, which is
 // how "read-only, and only the checks it advertises" is pinned down.
-const fakeDb = ({ types = DATETIME_TYPES, stats = {}, samples = [], bad = [], reportRows = [], reportError = null, typeProbeError = null } = {}) => {
+const fakeDb = ({ types = DATETIME_TYPES, stats = {}, samples = [], bad = [], reportRows = [], reportError = null, typeProbeError = null, roster = [] } = {}) => {
   const calls = [];
   const queryFn = async (sql, params) => {
     calls.push({ sql, params });
@@ -50,6 +51,7 @@ const fakeDb = ({ types = DATETIME_TYPES, stats = {}, samples = [], bad = [], re
     if (/ReadableRows/.test(sql)) return [stats];
     if (/SampleTime/.test(sql)) return samples;
     if (/BadValue/.test(sql)) return bad;
+    if (/IsActive/.test(sql)) return roster; // the eligible-employee roster the dry run also reads
     if (/EventCategory/.test(sql)) {
       if (reportError) throw reportError;
       return reportRows;
@@ -88,7 +90,7 @@ test("the doctor prints the configuration, the types, the range, the bad rows an
   assert.equal(CONFIG.connectionString.includes("s3cret!"), true);
 
   assert.match(text, /EventHistory\s+PeopleID int, CardNumber int, EventCategory int, EventDescription nvarchar, EventUTCTime varchar/);
-  assert.match(text, /p_people\s+PeopleID int, Firstname nvarchar, Lastname nvarchar, Department nvarchar/);
+  assert.match(text, /p_people\s+PeopleID int, Firstname nvarchar, Lastname nvarchar, Department nvarchar, IsActive bit/);
   assert.match(text, /Statement\s+reads EventUTCTime \(a varchar column\) through TRY_CONVERT/);
   assert.match(text, /readable as date\/time: 5,120 row\(s\), 2026-09-28 07:12:00 to 2026-10-04 18:40:00/);
   assert.match(text, /Samples\s+2026-09-28 07:12:00, 2026-09-28 07:15:00/);

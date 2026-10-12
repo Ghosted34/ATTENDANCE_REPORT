@@ -4,5 +4,10 @@
   "directories": { "output": "dist" },
   "files": ["main/**/*", "server/**/*", "renderer/**/*", "brand.json"],
   "win": { "target": [{ "target": "nsis", "arch": ["x64"] }] },
-  "nsis": { "oneClick": false, "perMachine": false, "allowToChangeInstallationDirectory": true }
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "deleteAppDataOnUninstall": false
+  }
 }

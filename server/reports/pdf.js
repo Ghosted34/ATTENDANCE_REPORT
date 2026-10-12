@@ -23,7 +23,8 @@ function columnWidths(columns, width) {
     if (column.key === "date") return 0.95;
     if (column.key === "name") return 1.65;
     if (column.key === "department") return 1.35;
-    if (column.key === "peopleId") return 1.1;
+    if (column.key === "idNumber") return 1.1;
+    if (column.key === "status") return 0.9;
     if (["firstEntry", "lastEntry"].includes(column.key)) return 1.05;
     if (column.key === "duration") return 1;
     if (["cardNumber", "accessCount"].includes(column.key)) return 0.85;
