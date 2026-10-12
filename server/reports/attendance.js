@@ -336,11 +336,15 @@ WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'EventHistory' AND COLUMN_NAME = 'Ev
  */
 export function rosterSqlFor(identity = "EmployeeID", timeKind = "datetime") {
   const badge = identityExpr(identity);
-  // One seek per active person: OUTER APPLY reads each person's latest granted, non-zero card on
-  // EventHistory and selects it as card.CardNumber. The apply does not change who is eligible
+  // One seek per active person: OUTER APPLY reads each person's latest usable card on EventHistory
+  // and selects it as card.CardNumber. The apply does not change who is eligible
   // (TRY_CONVERT(int, pp.IsActive) = 1) or how the badge filter is bound; it only adds the known
   // card so an absent day can still show one. A legacy text time column is read through
   // TRY_CONVERT(datetime2(3), …) so it cannot raise 241 — the same rule the swipe query uses.
+  // The card lookup is intentionally broader than the swipe ("Present") query: it takes the latest
+  // non-null, non-zero card for the PeopleID whatever event logged it, because some installs record
+  // the card on an event whose description is not 'Access Granted'. Present/Status still come only
+  // from granted swipes, so widening this lookup cannot turn an absence into a presence.
   const orderBy = timeKind === "datetime"
     ? "eh.EventUTCTime DESC"
     : "TRY_CONVERT(datetime2(3), eh.EventUTCTime) DESC";
@@ -351,8 +355,6 @@ OUTER APPLY (
   SELECT TOP (1) eh.CardNumber
   FROM dbo.EventHistory AS eh
   WHERE eh.PeopleID = pp.PeopleID
-    AND TRY_CONVERT(int, eh.EventCategory) = 10001
-    AND eh.EventDescription = N'Access Granted'
     AND eh.CardNumber IS NOT NULL AND LTRIM(RTRIM(CONVERT(VARCHAR(64), eh.CardNumber))) <> '0'
   ORDER BY ${orderBy}
 ) AS card
