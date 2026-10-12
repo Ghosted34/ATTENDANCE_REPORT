@@ -26,10 +26,12 @@ import { classifyColumn, EVENT_COLUMNS, isDateShapeError, PEOPLE_COLUMNS, withDa
  *     in application code: one per eligible person per local day with no granted swipe, never
  *     for a day after today. That keeps the SQL to one day-grouping statement and one roster.
  *
- * Rows are ordered in application code, once, for the screen and the exports alike: by department
- * (the report's grouping column), then by date, and within a day the Present rows before the Absent
- * ones. Every row carries the weekday of its local date ("day"), which is also a column of every
- * period — a single date names its weekday in the subtitle instead, since it has no Date column.
+ * Rows are ordered in application code, once, for the screen and the exports alike — by department,
+ * then status (Present before Absent), then date, then name — which is also how they are grouped:
+ * `GROUP_BY` cuts every department into a Present section and an Absent section, and each of those
+ * blocks runs by date. Every row carries the weekday of its local date ("day"), which is a column of
+ * every period — a single date names its weekday in the subtitle instead, since it has no Date
+ * column.
  *
  * Every value still arrives as a bound parameter; nothing from the request is concatenated.
  */
@@ -391,16 +393,21 @@ const guard = async (fn) => {
 };
 
 /**
- * Department first — the report groups by it, so a department's rows stay together — then date, so
- * the days run in order inside each department. On a day, everyone who swiped is listed before the
- * absentees, and each of those two blocks is alphabetical.
+ * The order the report is read in, and the order its sections are cut in — `GROUP_BY` splits each
+ * department into a Present block and an Absent block, so this sorts by department, then status
+ * (Present first), then date, then name. Inside `… — Present` and inside `… — Absent` the days
+ * still run in order, so a reader sees a department's attendance history and its absence history
+ * as two clean runs rather than interleaved day by day.
  */
 const STATUS_ORDER = { Present: 0, Absent: 1 };
 
+/** The grouping columns, in the order their sections are nested (see `group()` in export.js). */
+export const GROUP_BY = Object.freeze(["department", "status"]);
+
 const sortRows = (rows) => rows.sort((a, b) =>
   a.department.localeCompare(b.department) ||
-  a.date.localeCompare(b.date) ||
   (STATUS_ORDER[a.status] ?? 1) - (STATUS_ORDER[b.status] ?? 1) ||
+  a.date.localeCompare(b.date) ||
   a.name.localeCompare(b.name));
 
 /**
@@ -464,7 +471,9 @@ export default {
   title: "Daily attendance",
   description: "Who swiped in on a day, date range or month, with first and last entry. Active employees with no swipe are listed as Absent.",
   params: periodParams,
-  groupBy: "department",
+  // Two levels: every department is split into "Front Desk — Present" and "Front Desk — Absent"
+  // sections, so the swipes and the absences of a department never have to be told apart by eye.
+  groupBy: GROUP_BY,
   columns: COLUMNS,
   columnsFor,
   exportColumnsFor,

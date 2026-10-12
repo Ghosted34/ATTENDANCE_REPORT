@@ -2,16 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import ExcelJS from "exceljs";
 import fs from "node:fs";
+import zlib from "node:zlib";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import attendance, {
-  ABSENCE_SKIP_WEEKENDS, absentRows, columnsFor, daysInPeriod, exportColumnsFor, isIsoDate, isWeekend, localToday,
-  MAX_PERIOD_DAYS, monthBounds, normalizeParams, periodParams, rangeDays, readEventTimeType, ROSTER_SQL, runPeriod,
-  statementFor, subtitle, TEXT_SAFE_STATEMENT, weekdayOf,
+  ABSENCE_SKIP_WEEKENDS, absentRows, columnsFor, daysInPeriod, exportColumnsFor, GROUP_BY, isIsoDate, isWeekend,
+  localToday, MAX_PERIOD_DAYS, monthBounds, normalizeParams, periodParams, rangeDays, readEventTimeType, ROSTER_SQL,
+  runPeriod, statementFor, subtitle, TEXT_SAFE_STATEMENT, weekdayOf,
 } from "../server/reports/attendance.js";
 import absentees, { columnsFor as absenteesColumnsFor } from "../server/reports/absentees.js";
 import { classifyColumn, isDateShapeError, isError241 } from "../server/doctor.js";
-import { columnsOf, toCsv, toHtml, toXlsx } from "../server/reports/export.js";
+import { columnsOf, group, toCsv, toHtml, toXlsx } from "../server/reports/export.js";
+import { sectionsOf } from "../renderer/app/js/template.js";
 import { toPdf } from "../server/reports/pdf.js";
 
 // Two people, two local days: the range query returns one row per person per day.
@@ -110,6 +112,31 @@ const functionCalls = (sql, name) => {
     calls.push(args);
   }
   return calls;
+};
+
+/**
+ * The text PDFKit actually drew, decoded from the PDF's content streams: text is written as hex
+ * glyph runs inside `TJ` arrays (`[<4461696c> 15 <79> 0] TJ`), which is the only way to check what
+ * a PDF says without a PDF reader.
+ */
+const pdfTextRuns = (pdf) => {
+  const raw = pdf.toString("latin1");
+  const streams = [];
+  const stream = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+  let match;
+  while ((match = stream.exec(raw))) {
+    try {
+      streams.push(zlib.inflateSync(Buffer.from(match[1], "latin1")).toString("latin1"));
+    } catch {
+      /* a stream that is not deflated carries no text we need */
+    }
+  }
+  const runs = [];
+  for (const [, array] of streams.join("\n").matchAll(/\[([^\]]*)\]\s*TJ/g)) {
+    runs.push([...array.matchAll(/<([0-9a-fA-F]+)>/g)]
+      .map(([, hex]) => Buffer.from(hex, "hex").toString("latin1")).join(""));
+  }
+  return runs;
 };
 
 const assertBalancedSql = (sql) => {
@@ -267,38 +294,34 @@ test("the Day column names each row's weekday in every period, and the absentee 
     ["date", "day", "name", "idNumber", "department"]);
 });
 
-test("rows run by department and date, and on each day the present people come before the absentees", async () => {
+test("rows run by department, then Present before Absent, and by date inside each of those blocks", async () => {
   const { queryFn } = fakeQuery();
   const rows = await attendance.run({ mode: "range", start: "2026-10-05", end: "2026-10-07" }, { tz: 1, queryFn, now: NOW });
 
-  // Ops first with its three days in order; Ada's swipes before Chi's absences on each of them,
-  // and on a day nobody swiped the two absences are alphabetical.
-  assert.deepEqual(rows.map((r) => [r.department, r.date, r.status, r.name]), [
-    ["Ops", "2026-10-05", "Present", "Obi Ada"],
-    ["Ops", "2026-10-05", "Absent", "Eze Chi"],
-    ["Ops", "2026-10-06", "Present", "Obi Ada"],
-    ["Ops", "2026-10-06", "Absent", "Eze Chi"],
-    ["Ops", "2026-10-07", "Absent", "Eze Chi"],
-    ["Ops", "2026-10-07", "Absent", "Obi Ada"],
-    ["Security", "2026-10-05", "Absent", "Nwosu Ben"],
-    ["Security", "2026-10-06", "Present", "Nwosu Ben"],
-    ["Security", "2026-10-07", "Absent", "Nwosu Ben"],
+  // Ops first: its three swipes, then its three absences, each in date order. Security follows.
+  assert.deepEqual(rows.map((r) => [r.department, r.status, r.date, r.name]), [
+    ["Ops", "Present", "2026-10-05", "Obi Ada"],
+    ["Ops", "Present", "2026-10-06", "Obi Ada"],
+    ["Ops", "Absent", "2026-10-05", "Eze Chi"],
+    ["Ops", "Absent", "2026-10-06", "Eze Chi"],
+    ["Ops", "Absent", "2026-10-07", "Eze Chi"],
+    ["Ops", "Absent", "2026-10-07", "Obi Ada"],
+    ["Security", "Present", "2026-10-06", "Nwosu Ben"],
+    ["Security", "Absent", "2026-10-05", "Nwosu Ben"],
+    ["Security", "Absent", "2026-10-07", "Nwosu Ben"],
   ]);
 
-  // The same rule read as properties: grouped by department, dated inside it, Present first each day.
-  const sections = Map.groupBy(rows, (r) => r.department);
-  assert.deepEqual([...sections.keys()], ["Ops", "Security"]);
-  for (const [department, section] of sections) {
-    const dates = section.map((r) => r.date);
-    assert.deepEqual(dates, [...dates].sort(), `${department} runs by date`);
-    for (const [date, day] of Map.groupBy(section, (r) => r.date)) {
-      const statuses = day.map((r) => r.status);
-      const lastPresent = statuses.lastIndexOf("Present");
-      const firstAbsent = statuses.indexOf("Absent");
-      if (lastPresent >= 0 && firstAbsent >= 0) {
-        assert.ok(lastPresent < firstAbsent, `${department} ${date}: no Present row after an Absent one (${statuses})`);
+  // The same rule read as properties: the department's Present block and Absent block are each
+  // date-ordered, no Present row ever lands after an Absent one, and nobody is listed twice a day.
+  for (const [department, section] of Map.groupBy(rows, (r) => r.department)) {
+    assert.deepEqual([...Map.groupBy(section, (r) => r.status).keys()], ["Present", "Absent"], department);
+    for (const [status, block] of Map.groupBy(section, (r) => r.status)) {
+      const dates = block.map((r) => r.date);
+      assert.deepEqual(dates, [...dates].sort(), `${department} — ${status} runs by date`);
+      const perDay = Map.groupBy(block, (r) => r.date);
+      for (const [date, day] of perDay) {
+        assert.equal(new Set(day.map((r) => r.name)).size, day.length, `${department} ${date} lists each person once`);
       }
-      assert.equal(new Set(day.map((r) => r.name)).size, day.length, `${department} ${date} has one row per person`);
     }
   }
 });
@@ -313,6 +336,47 @@ test("the weekday comes from the calendar date alone, so leap days and month bou
     assert.equal(isWeekend(date), ["Saturday", "Sunday"].includes(weekdayOf(date)), date);
   }
   assert.equal(new Set(daysInPeriod("2026-10-01", "2026-10-31").map(weekdayOf)).size, 7);
+});
+
+test("each department is cut into a Present block and an Absent block, with its own heading and count", async () => {
+  const { queryFn } = fakeQuery();
+  const params = normalizeParams({ mode: "range", start: "2026-10-05", end: "2026-10-07" });
+  const rows = await attendance.run(params, { tz: 1, queryFn, now: NOW });
+
+  // What the page and the exports group by: department, then status.
+  assert.deepEqual([...GROUP_BY], ["department", "status"]);
+  const headings = group(attendance, rows).map((section) => `${section.name} (${section.rows.length})`);
+  assert.deepEqual(headings, ["Ops — Present (2)", "Ops — Absent (4)", "Security — Present (1)", "Security — Absent (2)"]);
+
+  // The screen splits identically, in the same order, because it reads the same grouping.
+  assert.deepEqual([...sectionsOf(rows, attendance.groupBy).keys()], [
+    "Ops — Present", "Ops — Absent", "Security — Present", "Security — Absent",
+  ]);
+
+  // So does the printable template Chromium renders (the Electron PDF source).
+  const html = toHtml(attendance, rows, params, "Reports Desk");
+  for (const heading of headings) {
+    assert.match(html, new RegExp(`<td colspan="11">${heading.replace(/[()]/g, "\\$&")}</td>`), heading);
+  }
+  assert.ok(html.indexOf("Ops — Present (2)") < html.indexOf("Ops — Absent (4)"), "Present comes first");
+
+  // The absentee report has no second level: every row there is Absent already.
+  assert.equal(absentees.groupBy, "department");
+  assert.deepEqual(group(absentees, rows.filter((r) => r.status === "Absent")).map((s) => `${s.name} (${s.rows.length})`),
+    ["Ops (4)", "Security (2)"]);
+});
+
+test("the PDFKit PDF draws the same split headings", async () => {
+  const { queryFn } = fakeQuery();
+  const params = normalizeParams({ mode: "range", start: "2026-10-05", end: "2026-10-07" });
+  const rows = await attendance.run(params, { tz: 1, queryFn, now: NOW });
+  const pdf = await toPdf(attendance, rows, params, "Reports Desk");
+  const drawn = pdfTextRuns(pdf).join("\n");
+  // PDFKit's Helvetica is WinAnsi, so the em dash of "Ops — Present" is drawn as a plain hyphen.
+  for (const heading of ["Ops - Present (2)", "Ops - Absent (4)", "Security - Present (1)", "Security - Absent (2)"]) {
+    assert.match(drawn, new RegExp(heading.replace(/[()]/g, "\\$&")), heading);
+  }
+  assert.ok(drawn.indexOf("Ops - Present (2)") < drawn.indexOf("Ops - Absent (4)"), "Present comes first in the PDF too");
 });
 
 /* ---------- Query ---------- */
@@ -517,12 +581,13 @@ test("eligible employees with no swipe are listed as Absent on every day of the 
     assert.equal(row.cardNumber, "—");
     assert.equal(row.firstEntry, "—");
   }
-  // Ada swiped on the 5th and 6th, so only the 7th is absent; Ben swiped on the 6th only.
+  // Ada swiped on the 5th and 6th, so only the 7th is absent; Ben swiped on the 6th only. A
+  // person's own rows come back in the report's order — their Present days, then their Absent ones.
   assert.deepEqual(out.filter((r) => r.idNumber === 7).map((r) => [r.date, r.status]), [
     ["2026-10-05", "Present"], ["2026-10-06", "Present"], ["2026-10-07", "Absent"],
   ]);
   assert.deepEqual(out.filter((r) => r.idNumber === 9).map((r) => [r.date, r.status]), [
-    ["2026-10-05", "Absent"], ["2026-10-06", "Present"], ["2026-10-07", "Absent"],
+    ["2026-10-06", "Present"], ["2026-10-05", "Absent"], ["2026-10-07", "Absent"],
   ]);
   // One row per person per day: never both Present and Absent for the same day.
   const keys = out.map((r) => `${r.idNumber}|${r.date}`);
@@ -732,10 +797,13 @@ test("Excel export follows the export template", async () => {
     "Date", "Day", "Name", "Employee ID", "Department", "Status", "Card no.", "First entry", "Last entry", "Duration", "Swipes",
   ]);
   assert.match(rangeSheet.getRow(2).getCell(1).value, /Attendance from 2026-10-05 to 2026-10-07/);
-  assert.equal(rangeSheet.getRow(5).getCell(1).value, "Ops (2)"); // the section heading, now also repeated per row
+  // A department is cut into its Present and Absent blocks, each with its own heading and count.
+  assert.equal(rangeSheet.getRow(5).getCell(1).value, "Ops — Present (2)");
   assert.equal(rangeSheet.getRow(6).getCell(1).value, "2026-10-05");
   assert.equal(rangeSheet.getRow(6).getCell(2).value, "Monday");
   assert.equal(rangeSheet.getRow(6).getCell(5).value, "Ops");
+  assert.equal(rangeSheet.getRow(8).getCell(1).value, "Security — Present (1)");
+  assert.equal(rangeSheet.getRow(9).getCell(3).value, "Nwosu Ben");
 
   const singleParams = normalizeParams({ date: "2026-10-05" });
   const singleBook = new ExcelJS.Workbook();

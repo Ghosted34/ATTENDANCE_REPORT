@@ -3,15 +3,34 @@ import { escapeHtml as esc, PRINT_PAGE } from "./print-template.js";
 
 export { esc };
 
+/** Joins the parts of a composite heading, e.g. "Front Desk — Present". */
+export const GROUP_JOINER = " — ";
+
+/**
+ * The heading of the section a row belongs to, or null when the row has no value for any part (a
+ * null name means "draw no heading", which is how an ungrouped report is rendered too).
+ */
+export function sectionName(row, keys) {
+  const parts = keys.map((key) => row[key]).filter((value) => value !== null && value !== undefined && value !== "");
+  return parts.length ? parts.join(GROUP_JOINER) : null;
+}
+
+/**
+ * Sections for a run, in the order the rows arrive (the report decides that order, not this
+ * function). `groupBy` is usually one column — department; an **array** splits a section further:
+ * the attendance report groups by `["department", "status"]`, so every department has its
+ * `… — Present` rows and its `… — Absent` rows as separate, headed blocks.
+ */
 export function group(report, rows) {
-  if (!report.groupBy) return [{ name: null, rows }];
+  const keys = !report.groupBy ? [] : (Array.isArray(report.groupBy) ? report.groupBy : [report.groupBy]);
+  if (!keys.length) return [{ name: null, rows }];
   const m = new Map();
   for (const r of rows) {
-    const k = r[report.groupBy];
-    if (!m.has(k)) m.set(k, []);
-    m.get(k).push(r);
+    const name = sectionName(r, keys);
+    if (!m.has(name)) m.set(name, []);
+    m.get(name).push(r);
   }
-  return [...m].map(([name, rows]) => ({ name, rows }));
+  return [...m].map(([name, sectionRows]) => ({ name, rows: sectionRows }));
 }
 
 /**

@@ -49,6 +49,8 @@ test("the report list advertises the mode select, a single-date default and mode
       "Name", "Employee ID", "Department", "Status", "Card no.", "First entry", "Last entry", "Duration", "Swipes",
     ]);
     assert.match(report.description, /Absent/);
+    // Sections are cut twice: a department's Present rows and its Absent rows are separate blocks.
+    assert.deepEqual(report.groupBy, ["department", "status"]);
   });
 });
 

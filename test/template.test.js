@@ -88,6 +88,31 @@ test("tableHtml renders group headings, alignment and wrapping", () => {
     .includes("grp"), false);
 });
 
+test("tableHtml cuts a section further when groupBy lists more than one column", () => {
+  const columns = [
+    { key: "department", label: "Department" },
+    { key: "status", label: "Status" },
+    { key: "name", label: "Name" },
+  ];
+  const rows = [
+    { department: "Ops", status: "Present", name: "Obi Ada" },
+    { department: "Ops", status: "Absent", name: "Eze Chi" },
+    { department: "Ops", status: "Absent", name: "Nwosu Ben" },
+    { department: "Security", status: "Present", name: "Yusuf Hassan" },
+  ];
+  const html = tableHtml({ columns, groupBy: ["department", "status"], rows });
+  // One heading per combination, in the order the rows arrive, with its own count.
+  assert.deepEqual([...html.matchAll(/<tr class="grp"><td colspan="3">([^<]*)<\/td><\/tr>/g)].map(([, name]) => name), [
+    "Ops — Present (1)", "Ops — Absent (2)", "Security — Present (1)",
+  ]);
+  assert.match(html, /<td class="">Eze Chi<\/td>/);
+
+  // A row with no value for the grouping columns shows under no heading at all, as on the server.
+  const ungrouped = tableHtml({ columns, groupBy: ["department", "status"], rows: [{ name: "Nobody", department: null, status: "" }] });
+  assert.equal(ungrouped.includes("grp"), false);
+  assert.match(ungrouped, /<td class="">Nobody<\/td>/);
+});
+
 test("csvFor and exportFileName match the mode", () => {
   const csv = csvFor({ columns: [{ key: "name", label: "Name" }], rows: [{ name: 'Ada, "Obi"' }] });
   assert.equal(csv, '\uFEFFName\r\n"Ada, ""Obi"""\r\n');

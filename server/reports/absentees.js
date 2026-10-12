@@ -27,6 +27,8 @@ export default {
   title: "Absentees",
   description: "Active employees with no granted swipe on each day of the chosen date, range or month.",
   params: periodParams,
+  // One section per department: every row here is Absent, so the attendance report's extra
+  // Present/Absent split would only repeat itself.
   groupBy: "department",
   columns: COLUMNS,
   columnsFor,

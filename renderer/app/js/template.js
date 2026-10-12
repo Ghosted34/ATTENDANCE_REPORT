@@ -101,15 +101,36 @@ export function tableHtml({ columns, groupBy, rows }) {
   const line = (row) => `<tr>${cells(row, "td")}</tr>`;
   let body = "";
   if (groupBy) {
-    const groups = Map.groupBy(rows, (row) => row[groupBy]);
-    for (const [name, list] of groups) {
-      body += `<tr class="grp"><td colspan="${columns.length}">${escapeHtml(name)} (${list.length})</td></tr>` +
+    for (const [name, list] of sectionsOf(rows, groupBy)) {
+      // A null name means the row has no value for the grouping column: the rows still show, with
+      // no heading — the same rule server/reports/export.js follows.
+      body += (name === null ? "" : `<tr class="grp"><td colspan="${columns.length}">${escapeHtml(name)} (${list.length})</td></tr>`) +
         list.map(line).join("");
     }
   } else {
     body = rows.map(line).join("");
   }
   return `<table>${head}<tbody>${body}</tbody></table>`;
+}
+
+/** Joins the parts of a composite heading ("Front Desk — Present"), matching server/reports/export.js. */
+export const GROUP_JOINER = " — ";
+
+/**
+ * Rows grouped into headed sections, in the order they arrive. `groupBy` may be one column
+ * (department) or several (department *and* status), in which case each combination gets its own
+ * heading — that is how the attendance report shows a department's Present and Absent rows apart.
+ */
+export function sectionsOf(rows, groupBy) {
+  const keys = Array.isArray(groupBy) ? groupBy : [groupBy];
+  const sections = new Map();
+  for (const row of rows) {
+    const parts = keys.map((key) => row[key]).filter((value) => value !== null && value !== undefined && value !== "");
+    const name = parts.length ? parts.join(GROUP_JOINER) : null;
+    if (!sections.has(name)) sections.set(name, []);
+    sections.get(name).push(row);
+  }
+  return sections;
 }
 
 const cellClass = (column) => [column.align || "", column.wrap ? "wrap" : ""].join(" ").trim();
