@@ -8,7 +8,13 @@ const make = (c) => {
   return new mssql.ConnectionPool({
     ...parsed,
     connectionTimeout: 5000, requestTimeout: 30000,
-    options: { trustServerCertificate: true, enableArithAbort: true, ...parsed.options },
+    options: {
+      trustServerCertificate: true, enableArithAbort: true, ...parsed.options,
+      // Older SQL Servers (2008–2014 without TLS 1.2 updates) only offer TLS 1.0/1.1, which
+      // Electron/Node refuse by default ("SSL routines ... UNSUPPORTED_PROTOCOL"). Allow them;
+      // TLS 1.2+ is still negotiated whenever the server supports it.
+      cryptoCredentialsDetails: { minVersion: "TLSv1", ...parsed.options?.cryptoCredentialsDetails },
+    },
     pool: { max: 10, min: 0, idleTimeoutMillis: 30000 },
   });
 };
