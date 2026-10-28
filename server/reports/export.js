@@ -33,13 +33,8 @@ export function group(report, rows) {
   return [...m].map(([name, sectionRows]) => ({ name, rows: sectionRows }));
 }
 
-/**
- * Columns for a run of exports. A report may vary them by mode, and the printable
- * template may keep a column the on-screen table hides (the attendance report shows
- * Department only as the section heading, which a filtered or sorted sheet would lose).
- */
-export const columnsOf = (report, params) =>
-  (report.exportColumnsFor || report.columnsFor ? (report.exportColumnsFor || report.columnsFor)(params) : report.columns) || [];
+/** The columns of a run: `columnsFor(params)` when the report has it, otherwise `columns`. Same as the screen. */
+export const columnsOf = (report, params) => (report.columnsFor ? report.columnsFor(params) : report.columns) || [];
 
 const widthFor = (column) =>
   ["date", "firstEntry", "lastEntry"].includes(column.key) ? 14 : Math.max(14, column.label.length + 4);

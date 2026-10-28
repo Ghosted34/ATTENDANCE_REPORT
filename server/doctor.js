@@ -262,7 +262,9 @@ export async function buildDoctorReport({ config, queryFn = query, today = new D
   try {
     const catalog = columnTypesQuery();
     const rows = await queryFn(catalog.sql, catalog.params);
-    types = new Map((rows ?? []).map((r) => [`${r.tbl}.${r.name}`, r.type]));
+    // SQL Server matches names regardless of case (the table is P_People), so the lookup does too.
+    const rawTypes = new Map((rows ?? []).map((r) => [`${r.tbl}.${r.name}`.toLowerCase(), r.type]));
+    types = { get: (key) => rawTypes.get(String(key).toLowerCase()) };
   } catch (error) {
     fail("Columns", `the column types could not be read: ${error.message}`);
     return report;
@@ -354,11 +356,27 @@ export async function buildDoctorReport({ config, queryFn = query, today = new D
   }
 
   // 6. A 7-day dry run through the report's own code path, so this answers "does it work now?".
+  const { readReportShape, EVENT_TABLES } = await import("./reports/lib/attendance-data.js");
+  const shape = await readReportShape(queryFn);
+  const used = shape.sources.map((src) => src.table);
+  const unused = EVENT_TABLES.filter((t) => !used.includes(t));
+  line("Event tables", `swipes are read from ${used.map((t) => `dbo.${t}`).join(" + ")}` +
+    (unused.length ? `; ${unused.map((t) => `dbo.${t}`).join(", ")} not used (missing, or lacks PeopleID/CardNumber/EventCategory/EventDescription/EventUTCTime).` : ", combined; an event in both is counted once."));
+
   const dry = await dryRunReport({ config, queryFn, today });
   if (dry.ok) {
-    line("Dry run", `the last 7 days (${dry.start}..${dry.end}) returned ${dry.rows} row(s) without an error.`);
+    line("Dry run", `the last 7 days with data (${dry.start}..${dry.end}) returned ${dry.rows} row(s) without an error: ${dry.present} present, ${dry.absent} absent.`);
+    // Everyone absent and nobody present is the signature of a swipe filter that does not match
+    // this database's events: the attendance report would then look exactly like the absentee one.
+    if (dry.present === 0 && dry.absent > 0) {
+      fail("Present", "nobody counted as present in 7 days. Present needs EventCategory 10001 with EventDescription 'Access Granted' — compare that with the event mix below.");
+    }
+    const mix = await eventMix(queryFn);
+    if (mix.length) {
+      line("Event mix", mix.map((m) => `${m.MixCategory ?? "NULL"} "${m.MixDescription ?? ""}" ×${Number(m.MixEvents).toLocaleString("en-US")}`).join(", "));
+    }
   } else {
-    fail("Dry run", `the last 7 days (${dry.start}..${dry.end}) failed: ${dry.error}`);
+    fail("Dry run", `the last 7 days with data (${dry.start}..${dry.end}) failed: ${dry.error}`);
     if (dry.error241) fail("", "error 241 confirmed — it is a data problem, not a parameter one: start with the type above, then the bad rows.");
     else if (dry.errorDateShape) fail("", `SQL Server date-shape error${dry.errorNumber ? ` ${dry.errorNumber}` : ""} confirmed — start with the column type and the report statement above.`);
   }
@@ -370,11 +388,15 @@ export async function buildDoctorReport({ config, queryFn = query, today = new D
  * doctor exercises the real statement selection and window code rather than a copy of it.
  */
 async function dryRunReport({ config, queryFn, today }) {
-  const { default: attendance } = await import("./reports/attendance.js");
-  const { start, end } = lastNDays(today, config.tzOffsetHours);
+  const { runPeriod, latestEventTime } = await import("./reports/lib/attendance-data.js");
+  // A copy of the database may stop weeks ago. Test the last 7 days that have data, so an old copy
+  // is not reported as "nobody present".
+  const latest = await latestEventTime(queryFn).catch(() => null);
+  const anchor = latest && latest.getTime() + 86400000 < today.getTime() ? new Date(latest.getTime() + 86400000) : today;
+  const { start, end } = lastNDays(anchor, config.tzOffsetHours);
   try {
-    const rows = await attendance.run({ mode: "range", start, end }, { tz: config.tzOffsetHours, queryFn });
-    return { ok: true, start, end, rows: rows.length };
+    const { present, absent } = await runPeriod({ mode: "range", start, end }, { tz: config.tzOffsetHours, queryFn, now: today });
+    return { ok: true, start, end, rows: present.length + absent.length, present: present.length, absent: absent.length };
   } catch (error) {
     return {
       ok: false,
@@ -386,6 +408,20 @@ async function dryRunReport({ config, queryFn, today }) {
       errorNumber: error.number,
     };
   }
+}
+
+/**
+ * The most common event category/description pairs in a sample of dbo.EventHistory, so a reader
+ * can see what this database calls a granted swipe. Read-only; a failure just skips the line.
+ */
+export const EVENT_MIX_SQL = `
+SELECT TOP (8) CONVERT(NVARCHAR(32), s.EventCategory) AS MixCategory, s.EventDescription AS MixDescription, COUNT(*) AS MixEvents
+FROM (SELECT TOP (50000) EventCategory, EventDescription FROM dbo.EventHistory) AS s
+GROUP BY s.EventCategory, s.EventDescription
+ORDER BY COUNT(*) DESC;`;
+
+async function eventMix(queryFn) {
+  try { return (await queryFn(EVENT_MIX_SQL, {})) ?? []; } catch { return []; }
 }
 
 /**

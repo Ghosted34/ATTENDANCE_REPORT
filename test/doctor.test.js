@@ -41,12 +41,18 @@ const orphanSwipe = {
   CardNumber: 555, FirstEntry: "09:15:00", LastEntry: "09:15:00", DurationMin: 0, AccessCount: 1,
 };
 
+// The active, carded people behind a set of swipe rows (an orphan swipe has no p_people entry).
+const rosterOf = (rows) => rows.filter((r) => r.Firstname).map((r) => ({
+  PeopleID: r.PeopleID, EmployeeID: r.EmployeeID, Firstname: r.Firstname, Lastname: r.Lastname,
+  Department: r.Department, CardNumber: r.CardNumber,
+}));
+
 // The dry run covers the seven whole local days before today (tz +1): 2026-09-28..2026-10-04.
 const TODAY = new Date("2026-10-05T09:00:00Z");
 
 // One row set per statement the doctor is allowed to run; anything else fails the test, which is
 // how "read-only, and only the checks it advertises" is pinned down.
-const fakeDb = ({ types = DATETIME_TYPES, stats = {}, samples = [], bad = [], reportRows = [], reportError = null, typeProbeError = null, roster = [] } = {}) => {
+const fakeDb = ({ types = DATETIME_TYPES, stats = {}, samples = [], bad = [], reportRows = [], reportError = null, typeProbeError = null, roster = rosterOf(reportRows), mix = [] } = {}) => {
   const calls = [];
   const queryFn = async (sql, params) => {
     calls.push({ sql, params });
@@ -65,6 +71,7 @@ const fakeDb = ({ types = DATETIME_TYPES, stats = {}, samples = [], bad = [], re
     if (/ReadableRows/.test(sql)) return [stats];
     if (/SampleTime/.test(sql)) return samples;
     if (/BadValue/.test(sql)) return bad;
+    if (/MixEvents/.test(sql)) return mix; // the event category/description sample
     if (/IsActive/.test(sql)) return roster; // the eligible-employee roster the dry run also reads
     if (/EventCategory/.test(sql)) {
       if (reportError) throw reportError;
@@ -113,7 +120,7 @@ test("the doctor prints the configuration, the types, the range, the bad rows an
   assert.match(text, /readable as date\/time: 5,120 row\(s\), 2026-09-28 07:12:00 to 2026-10-04 18:40:00/);
   assert.match(text, /Samples\s+2026-09-28 07:12:00, 2026-09-28 07:15:00/);
   assert.match(text, /Unparseable\s+2 value\(s\) cannot be read as a date\/time, most often "2026-13-45 08:00:00" ×3, "01\/01\/1900" ×1/);
-  assert.match(text, /Dry run\s+the last 7 days \(2026-09-28\.\.2026-10-04\) returned 2 row\(s\) without an error/);
+  assert.match(text, /Dry run\s+the last 7 days \(2026-09-28\.\.2026-10-04\) returned 10 row\(s\) without an error: 2 present, 8 absent/);
 
   assert.equal(report.problems, 1); // the bad rows are the only problem here
   assert.equal(lines.length, report.lines.length);
@@ -133,7 +140,7 @@ test("a healthy datetime column leaves nothing to fix, and a failing dry run is 
   assert.equal(healthy.report.problems, 0, healthy.text);
   assert.match(healthy.text, /Statement\s+reads EventUTCTime as a datetime column: the plain column/);
   assert.match(healthy.text, /Unparseable\s+not applicable/);
-  assert.match(healthy.text, /Dry run\s+the last 7 days \(2026-09-28\.\.2026-10-04\) returned 1 row\(s\)/);
+  assert.match(healthy.text, /Dry run\s+the last 7 days \(2026-09-28\.\.2026-10-04\) returned 5 row\(s\) without an error: 1 present, 4 absent/);
 
   // A 241 from the driver on a datetime column — the legacy "text in a datetime-shaped column"
   // situation — is reported as a data problem, not as a bug in the parameters.
@@ -197,7 +204,7 @@ test("a catalog without EmployeeID is a PeopleID fallback, not a failed people t
   assert.match(text, /p_people\s+PeopleID int, Firstname nvarchar, Lastname nvarchar, Department nvarchar, IsActive bit/);
   assert.doesNotMatch(text, /has to provide these/);
   assert.match(text, /Employee ID\s+dbo\.p_people\.EmployeeID was not found — the Employee ID column and filter fall back to PeopleID/);
-  assert.match(text, /returned 2 row\(s\)/);
+  assert.match(text, /returned 5 row\(s\) without an error: 1 present, 4 absent/); // the orphan swipe is not on record
   const swipe = db.calls.find((call) => /EventCategory/.test(call.sql));
   assert.match(swipe.sql, /pp\.PeopleID AS EmployeeID/);
   assert.doesNotMatch(swipe.sql, /pp\.EmployeeID/);
@@ -269,4 +276,18 @@ test("the doctor classifies types, names date-shape errors, and dry-runs whole l
   assert.deepEqual(lastNDays(new Date("2026-10-05T00:30:00Z"), 1, 7), { start: "2026-09-27", end: "2026-10-03" });
   assert.deepEqual(lastNDays(new Date("2026-01-01T00:30:00Z"), 1, 7), { start: "2025-12-24", end: "2025-12-30" });
   assert.deepEqual(lastNDays(TODAY, 0, 3), { start: "2026-10-02", end: "2026-10-04" });
+});
+
+test("a week with absences and no one present is flagged, with the database's own event mix beside it", async () => {
+  const db = fakeDb({
+    stats: { ReadableRows: 10, MinTime: new Date("2026-09-30T07:00:00Z"), MaxTime: new Date("2026-10-04T18:00:00Z"), OutOfRange: 0 },
+    reportRows: [],
+    roster: rosterOf([attendanceRow]),
+    mix: [{ MixCategory: "1", MixDescription: "Valid Card Entry", MixEvents: 4200 }],
+  });
+  const { report, text } = await capture({ config: CONFIG, queryFn: db.queryFn, today: TODAY });
+  assert.match(text, /returned 5 row\(s\) without an error: 0 present, 5 absent/);
+  assert.match(text, /FAIL Present\s+nobody counted as present in 7 days/);
+  assert.match(text, /Event mix\s+1 "Valid Card Entry" ×4,200/);
+  assert.ok(report.problems >= 1);
 });

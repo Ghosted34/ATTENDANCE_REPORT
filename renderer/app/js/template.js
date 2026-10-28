@@ -6,7 +6,7 @@
  * inputs are collected.
  *
  * Inputs
- *   - Fixed inputs: the fields a report declares with `type` "date" | "text" | "number",
+ *   - Fixed inputs: the fields a report declares with `type` "date" | "text" | "number" | "time",
  *     or an `options` list. Every field is rendered every time; the ones whose `mode` does
  *     not match are hidden and disabled, so they never reach the request.
  *   - Defaults: a field's own `default` (for example today for date fields, or the current
@@ -138,24 +138,57 @@ export function visibleColumns(columns = [], hidden = []) {
  * `omit`, so the field is left out before it is rendered rather than patched out of the markup.
  */
 export function paramFieldsHtml(report, values = {}, { omit = [] } = {}) {
-  return (report.params || []).filter((p) => !omit.includes(p.name)).map((p) => {
+  const params = (report.params || []).filter((p) => !omit.includes(p.name));
+  // Neighbouring fields with the same `group` are drawn together in one labelled box
+  // (Punctuality's three arrival times). `groupHint` on the first one is shown under the box.
+  const parts = [];
+  for (const p of params) {
+    const html = fieldHtml(p, values);
+    const last = parts[parts.length - 1];
+    if (p.group && last?.group === p.group) last.html.push(html);
+    else parts.push({ group: p.group || null, hint: p.groupHint || "", mode: p.mode || "", html: [html] });
+  }
+  return parts.map(({ group, hint, mode, html }) => {
+    if (!group) return html.join("");
+    const scope = mode ? ` data-mode="${escapeHtml(mode)}"` : "";
+    const note = hint ? `<p class="hint">${escapeHtml(hint)}</p>` : "";
+    return `<fieldset class="field field-group"${scope}><legend class="field-label">${escapeHtml(group)}</legend>` +
+      `<div class="field-group-row">${html.join("")}</div>${note}</fieldset>`;
+  }).join("");
+}
+
+function fieldHtml(p, values) {
+  {
     const id = `p_${p.name}`;
     const scope = p.mode ? ` data-mode="${escapeHtml(p.mode)}"` : "";
     const label = `<label for="${id}">${escapeHtml(p.label)}</label>`;
     const hint = p.hint ? `<p class="hint">${escapeHtml(p.hint)}</p>` : "";
+    if (p.type === "weekdays") {
+      // Sun–Sat toggles; the picked days travel as "1,3,5" in a hidden input. None picked = every day.
+      const picked = String(values[p.name] ?? "").split(",").filter(Boolean);
+      const buttons = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day, i) =>
+        `<button type="button" class="day" data-day="${i}" aria-pressed="${picked.includes(String(i))}">${day}</button>`).join("");
+      return `<div class="field days-field"${scope}><span class="field-label" id="${id}_label">${escapeHtml(p.label)}</span>` +
+        `<div class="day-picker" role="group" aria-labelledby="${id}_label">${buttons}</div>` +
+        `<input type="hidden" id="${id}" name="${escapeHtml(p.name)}" value="${escapeHtml(picked.join(","))}">${hint}</div>`;
+    }
     if (p.type === "select") {
       const options = (p.options || []).map((option) =>
         `<option value="${escapeHtml(option.value)}"${String(option.value) === String(values[p.name]) ? " selected" : ""}>` +
         `${escapeHtml(option.label)}</option>`).join("");
       return `<div class="field"${scope}>${label}<select id="${id}" name="${escapeHtml(p.name)}">${options}</select>${hint}</div>`;
     }
-    const type = ["date", "month", "number"].includes(p.type) ? p.type : "text";
+    const type = ["date", "month", "number", "time"].includes(p.type) ? p.type : "text";
     const required = p.optional ? "" : " required";
     const placeholder = p.placeholder ? ` placeholder="${escapeHtml(p.placeholder)}"` : "";
-    return `<div class="field"${scope}>${label}` +
-      `<input id="${id}" name="${escapeHtml(p.name)}" type="${type}" value="${escapeHtml(values[p.name] ?? "")}"${placeholder}${required}>` +
+    const cls = type === "time" ? "field time-field" : "field";
+    // Clock times to the minute; the default is put back if the field is cleared.
+    const step = type === "time" ? ` step="60"` : "";
+    const fallback = type === "time" && p.default ? ` data-default="${escapeHtml(p.default)}"` : "";
+    return `<div class="${cls}"${scope}>${label}` +
+      `<input id="${id}" name="${escapeHtml(p.name)}" type="${type}" value="${escapeHtml(values[p.name] ?? "")}"${placeholder}${required}${step}${fallback}>` +
       `${hint}</div>`;
-  }).join("");
+  }
 }
 
 /** Default status pill renderer - can be overridden by caller */
@@ -223,21 +256,27 @@ export function emptyStateHtml({ period = "date", canRunAbsentees = false } = {}
  * Rows with nothing in that column stay at the bottom in both directions, which is what people
  * expect when they sort a report that has blanks in it.
  */
+// One collator for every comparison: building one per call made sorting a month of rows take seconds.
+const COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
 export function sortRows(rows, sort = {}) {
   const { key, dir } = sort || {};
   if (!key || !dir) return rows;
   const sign = dir === "desc" ? -1 : 1;
-  const blank = (row) => (row[key] === null || row[key] === undefined || row[key] === "" ? 1 : 0);
+  // A row may carry `<key>Sort` (e.g. firstEntrySort "15:21:05" for "3:21:05 PM"): that value orders it.
+  const sortKey = `${key}Sort`;
+  const valueOf = (row) => (sortKey in row ? row[sortKey] : row[key]);
+  const blank = (row) => { const v = valueOf(row); return v === null || v === undefined || v === "" || v === "—" ? 1 : 0; };
   return rows
     .map((row, index) => ({ row, index }))
     .sort((a, b) => {
       const gaps = blank(a.row) - blank(b.row);
       if (gaps) return gaps;
       if (blank(a.row)) return a.index - b.index; // blanks keep their order
-      const left = a.row[key], right = b.row[key];
+      const left = valueOf(a.row), right = valueOf(b.row);
       const order = typeof left === "number" && typeof right === "number"
         ? left - right
-        : String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" });
+        : COLLATOR.compare(String(left), String(right));
       // The index keeps equal values in the order the report produced them.
       return order ? order * sign : a.index - b.index;
     })

@@ -1,15 +1,8 @@
-import { normalizeParams, periodColumnsFor, periodParams, periodSubtitle, runPeriod } from "./attendance.js";
+// Absentees: only the Absent rows of the attendance report, so the two can never disagree.
 
-/**
- * Absentee-only report: the same periods, the same parameterized swipe and roster queries, and the
- * same absence rule as the attendance report — but only the Absent rows. Nothing here queries
- * anything itself, so the two reports can never disagree about who is absent.
- */
+import { runPeriod } from "./lib/attendance-data.js";
+import { normalizePeriod, periodParams, periodSubtitle, withPeriodColumns } from "./lib/period.js";
 
-// Absent rows have no swipe, so no entry, duration, swipes or status columns: who the person is,
-// where they work, the card on file for them, and — through the shared period columns — the date
-// and its weekday. The card is the day's card when the day has a swipe, or the person's latest
-// granted card otherwise; "—" only when the person has neither.
 const COLUMNS = [
   { key: "name", label: "Name", minWidth: 150 },
   { key: "idNumber", label: "Employee ID", minWidth: 80 },
@@ -17,26 +10,17 @@ const COLUMNS = [
   { key: "department", label: "Department", minWidth: 120 },
 ];
 
-/** The same period columns as the attendance report: Date for a range or month, Day for every period. */
-export const columnsFor = (params = {}) => periodColumnsFor(COLUMNS, params);
-
-/** Screen and exports use the one list, exactly as they do on the attendance report. */
-export const exportColumnsFor = (params = {}) => columnsFor(params);
-
-export const subtitle = (params = {}) => periodSubtitle(params, "Absentees");
-
 export default {
   id: "absentees",
   title: "Absentees",
-  description: "Active employees with no granted swipe on each day of the chosen date, range or month.",
+  description: "Who did not come in on a working day (Mon–Fri).",
+  category: "Exceptions",
+  icon: "user-x",
   params: periodParams,
-  // One section per department: every row here is Absent, so the attendance report's extra
-  // Present/Absent split would only repeat itself.
   groupBy: "department",
   columns: COLUMNS,
-  columnsFor,
-  exportColumnsFor,
-  normalize: normalizeParams,
-  subtitle,
-  run: async (params, options = {}) => (await runPeriod(params, options)).absent,
+  columnsFor: (params) => withPeriodColumns(COLUMNS, params),
+  normalize: normalizePeriod,
+  subtitle: (params) => periodSubtitle(params, "Absentees"),
+  run: async (params, options) => (await runPeriod(params, options)).absent,
 };

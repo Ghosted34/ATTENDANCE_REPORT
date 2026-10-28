@@ -1,6 +1,6 @@
 {
   "name": "reports-desk",
-  "version": "0.1.0",
+  "version": "0.1.7",
   "private": true,
   "type": "module",
   "main": "main/main.js",

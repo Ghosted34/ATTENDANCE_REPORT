@@ -1,7 +1,7 @@
 import {
   escapeHtml as esc, exportFileName, paramFieldsHtml, resolveReportParams, tableHtml,
   groupByToggleHtml, emptyStateHtml, viewStateOf, visibleColumns, withViewState, VIEW_KEYS,
-  paginateRows, PAGE_SIZES, DEFAULT_PAGE_SIZE,
+  PAGE_SIZES, DEFAULT_PAGE_SIZE,
 } from "./template.js";
 
 const $ = (s) => document.querySelector(s);
@@ -78,28 +78,6 @@ function statusPill(status) {
   return `<span class="status-pill ${status.toLowerCase()}"><span>${icon}</span>${label}</span>`;
 }
 
-/* ---------- Helper: Compute Summary ---------- */
-function computeSummary(rows, groupBy) {
-  if (!rows || rows.length === 0) return { total: 0, present: 0, absent: 0, departments: 0 };
-
-  const total = rows.length;
-  let present = 0, absent = 0;
-  const departments = new Set();
-
-  for (const row of rows) {
-    departments.add(row.department);
-    if (row.status === "Present") present++;
-    else if (row.status === "Absent") absent++;
-  }
-
-  return {
-    total,
-    present,
-    absent,
-    departments: departments.size
-  };
-}
-
 /* ---------- Helper: Format Summary Text ---------- */
 function formatSummary(summary) {
   const parts = [];
@@ -171,7 +149,6 @@ function loginView() {
         </button>
       </form>
       <footer class="auth-foot">
-        <p class="auth-note"><span class="dev-badge">DEV</span> Local development build</p>
         ${appVersion ? `<p class="auth-version">${esc(appName)} ${esc(appVersion)}</p>` : ""}
       </footer>
     </div>
@@ -242,16 +219,22 @@ function loginView() {
   };
 }
 
+// Home-screen card icons. A report picks one with `icon` in its definition (server/reports/*.js).
+const CARD_SVG = (paths) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+const CARD_ICONS = {
+  calendar: CARD_SVG('<rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/><path d="m9 15 2 2 4-4"/>'),
+  "user-x": CARD_SVG('<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="m17 8 5 5m0-5-5 5"/>'),
+  clock: CARD_SVG('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'),
+  chart: CARD_SVG('<path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/>'),
+};
+
 function homeView() {
   const cards = reportList.map((r, index) => {
-    const isAbsentees = r.id === "absentees";
-    const icon = isAbsentees
-      ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="m17 8 5 5m0-5-5 5"/></svg>'
-      : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/><path d="m9 15 2 2 4-4"/></svg>';
-    const category = isAbsentees ? "Exceptions" : "Attendance";
-    return `<a class="report-card${isAbsentees ? " report-card--absence" : ""}" href="#/reports/${encodeURIComponent(r.id)}">
+    const icon = CARD_ICONS[r.icon] || CARD_ICONS.calendar;
+    const category = esc(r.category || "Report");
+    // The red "exception" accent goes with the user-x icon.
+    return `<a class="report-card${r.icon === "user-x" ? " report-card--absence" : ""}" href="#/reports/${encodeURIComponent(r.id)}">
       <span class="report-card-icon">${icon}</span>
-      <span class="report-card-index">${String(index + 1).padStart(2, "0")}</span>
       <span class="report-card-category">${category}</span>
       <h3>${esc(r.title)}</h3>
       <p>${esc(r.description)}</p>
@@ -262,21 +245,11 @@ function homeView() {
   }).join("");
   const count = reportList.length;
   view.innerHTML = `<main class="home">
-    <section class="home-hero" aria-labelledby="homeTitle">
-      <div class="home-hero-copy">
-        <p class="eyebrow"><span class="eyebrow-dot"></span>REPORTING WORKSPACE</p>
-        <h1 id="homeTitle">Reports</h1>
-        <p>Useful attendance insights, all in one place.</p>
-      </div>
-      <div class="home-hero-stat">
-        <span class="home-stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg></span>
-        <span><strong>${count}</strong><span class="home-stat-label">${count === 1 ? "report" : "reports"}<br>available</span></span>
-      </div>
-    </section>
-    <section class="report-library" aria-labelledby="libraryTitle">
-      <div class="section-heading">
-        <div><h2 id="libraryTitle">Report library</h2><p>Choose a report to get started.</p></div>
-      </div>
+    <header class="home-head">
+      <h1 id="homeTitle">Reports</h1>
+      <p class="muted">Choose a report.</p>
+    </header>
+    <section class="report-library" aria-labelledby="homeTitle">
       ${cards
         ? `<div class="report-grid">${cards}</div>`
         : `<div class="no-reports" role="status">
@@ -347,12 +320,8 @@ function reportView(id) {
   view.innerHTML = `<main class="report">
     <a class="back" href="#/reports">All reports</a>
     <header class="report-head">
-      <div class="report-title">
-        <p class="report-kicker">REPORT</p>
-        <h1>${esc(r.title)}</h1>
-        <p class="muted">${esc(r.description)}</p>
-      </div>
-      <div class="report-meta msg" id="m" role="status" aria-live="polite"></div>
+      <h1>${esc(r.title)}</h1>
+      <p class="muted">${esc(r.description)}</p>
     </header>
     <form class="toolbar" id="f">
       <div class="toolbar-filters">
@@ -369,12 +338,8 @@ function reportView(id) {
       </div>
       <div class="toolbar-actions">
         <div class="toolbar-view-controls">
-          <div class="field grouping-field">
-            <span class="field-label">Group rows</span>
-            ${groupByToggleHtml(useGroupBy)}
-          </div>
-          <div class="field columns-field">
-            <span class="field-label">Visible columns</span>
+          ${groupByToggleHtml(useGroupBy)}
+          <div class="columns-field">
             <div class="columns-menu">
               <button type="button" class="btn" id="columnsBtn" aria-label="Visible columns" aria-expanded="false"
                       aria-controls="columnsPanel" data-tooltip="Show or hide columns">
@@ -389,7 +354,6 @@ function reportView(id) {
           </div>
         </div>
         <div class="toolbar-export">
-          <span class="toolbar-label">Export</span>
           <div class="export-group" id="exportGroup" role="group" aria-label="Export report">
             <button type="button" class="btn" data-x="xlsx" data-label="Excel" disabled data-tooltip="Export to Excel">Excel</button>
             <button type="button" class="btn" data-x="csv" data-label="CSV" disabled data-tooltip="Export to CSV">CSV</button>
@@ -398,6 +362,7 @@ function reportView(id) {
         </div>
       </div>
     </form>
+    <div class="report-meta msg" id="m" role="status" aria-live="polite"></div>
     <div class="table-wrap hidden" id="out" role="region" aria-label="Report results"></div>
     <div class="table-footer hidden" id="pagination">
       <p class="page-summary" id="pageSummary" role="status" aria-live="polite"></p>
@@ -444,6 +409,11 @@ function reportView(id) {
   let currentPage = urlView.page || 1;
   let pageSize = urlView.pageSize || DEFAULT_PAGE_SIZE;
   pageSizeSelect.value = String(pageSize);
+
+  // A cleared time field goes back to its default instead of blocking Run report.
+  for (const input of form.querySelectorAll("input[data-default]")) {
+    input.addEventListener("blur", () => { if (!input.value) input.value = input.dataset.default; });
+  }
 
   const valuesNow = () => Object.fromEntries(new FormData(form));
   const activeWindow = () => {
@@ -558,17 +528,27 @@ function reportView(id) {
       syncGroupTabs?.();
       // Re-render through the one path, so the summary, sort caption and address stay in step —
       // and, when there is no table yet, at least the address does.
-      if (!out.classList.contains("hidden") && latestRows.length > 0) renderTable();
+      if (!out.classList.contains("hidden") && latestPage?.totalRows > 0) renderTable();
       else syncViewInUrl();
     });
   }
+
+  // Day picker (Sun–Sat): each button toggles its day; the hidden input carries "1,3,5".
+  form.addEventListener("click", (e) => {
+    const btn = e.target.closest(".day-picker .day");
+    if (!btn) return;
+    btn.setAttribute("aria-pressed", String(btn.getAttribute("aria-pressed") !== "true"));
+    const field = btn.closest(".days-field");
+    field.querySelector("input[type=hidden]").value = [...field.querySelectorAll('.day[aria-pressed="true"]')]
+      .map((b) => b.dataset.day).join(",");
+  });
 
   // Show only the fields for the selected mode; hidden fields are disabled so they are
   // neither validated nor sent, and the server keeps validating whatever arrives.
   const syncMode = () => {
     const mode = valuesNow().mode || "single";
     for (const field of form.querySelectorAll(".field[data-mode]")) {
-      const show = field.dataset.mode === mode;
+      const show = field.dataset.mode.split(" ").includes(mode);
       field.classList.toggle("hidden", !show);
       field.querySelectorAll("input,select").forEach((el) => (el.disabled = !show));
     }
@@ -614,8 +594,10 @@ function reportView(id) {
     out.querySelector('[data-empty-action="date"]')?.addEventListener("click", focusPeriodField);
   };
 
-  // Store latest rows and columns for re-rendering when toggling groupBy
-  let latestRows = [];
+  // The server keeps the full run; the screen only holds the page on display. `runQs` is the query
+  // the report was last run with, so paging never picks up form edits that have not been run.
+  let latestPage = null;
+  let runQs = "";
   let latestColumns = [];
   let latestSubtitle = "";
   let currentSort = urlView.sort;
@@ -627,30 +609,27 @@ function reportView(id) {
     return column ? ` \u00b7 Sorted by ${column.label}, ${currentSort.dir === "desc" ? "descending" : "ascending"}` : "";
   };
 
-  /**
-   * Draws the table from the rows already in hand. Both switches that change the view without
-   * re-running the report — Grouped/Flat and a header click — come through here, so the table,
-   * the summary and the sort caption cannot disagree about what is on screen.
-   */
-  const renderTable = () => {
-    if (!latestRows.length) return;
+  /** The view the next page request asks for: page, size, sort and grouping. */
+  const viewQs = () => {
+    const params = new URLSearchParams({ page: String(currentPage), pageSize: String(pageSize), group: currentGroupBy ? "grouped" : "flat" });
+    if (currentSort) { params.set("sort", currentSort.key); params.set("dir", currentSort.dir); }
+    return params.toString();
+  };
+
+  /** Draws the page in hand: table, status line and pager. */
+  const drawTable = () => {
+    if (!latestPage?.totalRows) return;
     const cols = latestColumns.length ? latestColumns : r.columns;
-    // A sort survives a change of period, but not the disappearance of its column. The caption
-    // looks the column up in the full list, so hiding a column cannot break the sort it created.
     const sort = currentSort && cols.some((c) => c.key === currentSort.key) ? currentSort : null;
-    currentSort = sort;
     const groupBy = currentGroupBy ? r.groupBy : null;
-    const page = paginateRows(latestRows, { page: currentPage, pageSize, groupBy, sort });
-    currentPage = page.page;
-    pageSize = page.pageSize;
-    const summary = computeSummary(latestRows, groupBy);
+    const page = latestPage;
     const number = (value) => new Intl.NumberFormat().format(value);
-    setMsg(`${latestSubtitle} · ${formatSummary(summary)}${sortCaption()}`);
+    setMsg(`${latestSubtitle} · ${formatSummary(page.summary)}${sortCaption()}`);
     syncColumnsMenu(cols);
     out.classList.remove("hidden");
     out.innerHTML = tableHtml({
       columns: visibleColumns(cols, hiddenColumns),
-      groupBy, rows: page.rows, groupCounts: page.groupCounts, statusPill, sort,
+      groupBy, rows: page.rows, groupCounts: page.groupCounts ? new Map(page.groupCounts) : null, statusPill, sort,
     });
 
     const first = page.startIndex + 1;
@@ -665,6 +644,27 @@ function reportView(id) {
     pageControls.classList.toggle("hidden", page.totalRows <= PAGE_SIZES[0]);
     pagination.classList.remove("hidden");
     syncViewInUrl();
+  };
+
+  /**
+   * Fetches the page for the current view (the server re-uses the run it already has) and draws
+   * it. Paging, sorting and the Grouped/Flat switch all come through here. A slower answer that
+   * arrives after a newer request is dropped.
+   */
+  let pageTicket = 0;
+  const renderTable = async () => {
+    if (!runQs) return;
+    const ticket = ++pageTicket;
+    try {
+      const data = await (await api(`/reports/${id}/data?${runQs}&${viewQs()}`)).json();
+      if (ticket !== pageTicket) return;
+      latestPage = data;
+      currentPage = data.page;
+      pageSize = data.pageSize;
+      drawTable();
+    } catch (err) {
+      if (ticket === pageTicket) setMsg(err.message, "err");
+    }
   };
 
   /**
@@ -728,7 +728,7 @@ function reportView(id) {
     }
     hiddenColumns = hidden;
     window.setHiddenColumns?.(id, hiddenColumns);
-    renderTable();
+    drawTable();
   });
 
   // Escape closes the panel and hands focus back to the button that opened it.
@@ -785,13 +785,17 @@ function reportView(id) {
     progressInner.style.transition = "width 2s ease-in-out";
 
     try {
-      const { rows, subtitle, columns } = await (await api(`/reports/${id}/data?${qs()}`)).json();
-      const cols = columns?.length ? columns : r.columns;
+      // fresh=1: Run report always re-reads the database; paging afterwards re-uses this run.
+      const runQuery = qs();
+      const data = await (await api(`/reports/${id}/data?${runQuery}&${viewQs()}&fresh=1`)).json();
+      const cols = data.columns?.length ? data.columns : r.columns;
 
-      // Store for re-rendering
-      latestRows = rows;
+      latestPage = data;
+      runQs = runQuery;
+      currentPage = data.page;
+      pageSize = data.pageSize;
       latestColumns = cols;
-      latestSubtitle = subtitle;
+      latestSubtitle = data.subtitle;
 
       // Hide loading state
       progressBar.classList.add("hidden");
@@ -806,8 +810,8 @@ function reportView(id) {
       runWindow = window_;
       comparisonWindow = window_;
 
-      if (rows.length) {
-        renderTable(); // sets the summary line, page summary and draws one page of the table
+      if (data.totalRows) {
+        drawTable(); // sets the summary line, page summary and draws one page of the table
         exportGroup.querySelectorAll("[data-x]").forEach((b) => (b.disabled = false));
       } else {
         currentPage = 1;

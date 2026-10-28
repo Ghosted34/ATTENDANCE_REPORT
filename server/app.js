@@ -6,14 +6,37 @@ import { login, requireAuth } from "./auth.js";
 import { reports } from "./reports/registry.js";
 import { toCsv, toXlsx, toHtml } from "./reports/export.js";
 import { toPdf } from "./reports/pdf.js";
-// The renderer's template module is the DOM-free home of the report presentation rules (its own
-// docstring says so, and the tests import it from both sides), so the ordering an export uses is
-// the very function the table sorts with — one comparator, so the sheet cannot come out in a
-// different order from the screen it was exported from.
-import { sectionsOf, sortRows } from "../renderer/app/js/template.js";
+// The screen's own sort and grouping functions, so an export comes out in the same order as the table.
+import { paginateRows, sectionsOf, sortRows } from "../renderer/app/js/template.js";
 
 const web = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "renderer", "app");
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
+
+/**
+ * Finished runs, kept for a few minutes so paging, sorting and exporting a big report do not
+ * re-run its SQL, and so the screen only ever receives one page of rows (a month of rows sent
+ * to the window at once is what used to turn it white). "Run report" always asks for a fresh run.
+ */
+const RUN_TTL_MS = 10 * 60 * 1000;
+const RUN_CACHE_MAX = 4;
+const runCache = new Map();
+const cachedRun = async (key, fresh, compute) => {
+  const hit = runCache.get(key);
+  if (!fresh && hit && Date.now() - hit.at < RUN_TTL_MS) return hit.rows;
+  const rows = await compute();
+  runCache.delete(key);
+  runCache.set(key, { at: Date.now(), rows });
+  while (runCache.size > RUN_CACHE_MAX) runCache.delete(runCache.keys().next().value);
+  return rows;
+};
+
+/** Totals for the status line, over every row of the run (not just the page). */
+const summaryOf = (rows) => ({
+  total: rows.length,
+  present: rows.filter((r) => r.status === "Present").length,
+  absent: rows.filter((r) => r.status === "Absent").length,
+  departments: new Set(rows.map((r) => r.department)).size,
+});
 
 export function createApp({ secret, getConfig, renderPdf }) {
   const app = express();
@@ -43,8 +66,8 @@ export function createApp({ secret, getConfig, renderPdf }) {
   api.use(requireAuth);
 
   api.get("/reports", (_req, res) =>
-    res.json([...reports.values()].map(({ id, title, description, params, columns, groupBy }) =>
-      ({ id, title, description, params, columns, groupBy }))));
+    res.json([...reports.values()].map(({ id, title, description, category, icon, params, columns, groupBy }) =>
+      ({ id, title, description, category, icon, params, columns, groupBy }))));
 
   /**
    * The rows in the order the reader asked for. The table sorts in the browser for speed and
@@ -75,14 +98,37 @@ export function createApp({ secret, getConfig, renderPdf }) {
     }
     // Reports own their validation so bad dates/ranges fail with a clear 400 before SQL runs.
     const params = report.normalize ? report.normalize(raw) : raw;
-    const rows = await report.run(params, { tz: getConfig().tzOffsetHours });
+    const tz = getConfig().tzOffsetHours;
+    const rows = await cachedRun(JSON.stringify([report.id, params, tz]), req.query.fresh === "1",
+      () => report.run(params, { tz }));
     const columns = report.columnsFor ? report.columnsFor(params) : report.columns;
-    return { report, params, columns, rows: inRequestedOrder(rows, columns, req.query, report.groupBy) };
+    return { report, params, columns, allRows: rows, rows: inRequestedOrder(rows, columns, req.query, report.groupBy) };
   };
 
+  /**
+   * One page of a run, in the order and grouping the screen asked for (page, pageSize, sort, dir,
+   * group=grouped|flat), plus the totals. Exports use the full run instead.
+   */
   api.get("/reports/:id/data", wrap(async (req, res) => {
-    const { rows, report, params, columns } = await run(req);
-    res.json({ rows, subtitle: report.subtitle(params), columns });
+    const { report, params, columns, allRows } = await run(req);
+    const key = String(req.query.sort ?? "");
+    const dir = req.query.dir === "desc" || req.query.dir === "asc" ? req.query.dir : "";
+    const sort = key && dir && columns.some((c) => c.key === key) ? { key, dir } : null;
+    const groupBy = req.query.group === "flat" ? null : report.groupBy ?? null;
+    const pageSize = Math.min(500, Math.max(1, Number(req.query.pageSize) || 50));
+    const page = paginateRows(allRows, { page: Number(req.query.page) || 1, pageSize, groupBy, sort });
+    res.json({
+      subtitle: report.subtitle(params),
+      columns,
+      rows: page.rows,
+      page: page.page,
+      pageSize: page.pageSize,
+      totalRows: page.totalRows,
+      totalPages: page.totalPages,
+      startIndex: page.startIndex,
+      groupCounts: page.groupCounts ? [...page.groupCounts] : null,
+      summary: summaryOf(allRows),
+    });
   }));
   api.get("/reports/:id/xlsx", wrap(async (req, res) => {
     const { report, params, rows } = await run(req);

@@ -26,21 +26,26 @@ const dbRows = [
     CardNumber: 1234, FirstEntry: "07:58:41", LastEntry: "07:58:41", DurationMin: 0, AccessCount: 1 },
   { LocalDate: "2026-10-06", PeopleID: 9, EmployeeID: "E-1009", Firstname: "Ben", Lastname: "Nwosu", Department: "Security",
     CardNumber: 9876, FirstEntry: "06:30:00", LastEntry: "18:00:00", DurationMin: 690, AccessCount: 4 },
-  // Not in p_people: the LEFT JOIN yields no EmployeeID. An unfiltered run still shows the swipe.
+  // Not in p_people (so not active): the LEFT JOIN yields no EmployeeID, and the report drops it.
   { LocalDate: "2026-10-05", PeopleID: 42, EmployeeID: null, Firstname: null, Lastname: null, Department: null,
     CardNumber: 555, FirstEntry: "09:15:00", LastEntry: "09:15:00", DurationMin: 0, AccessCount: 1 },
 ];
 
 // Active employees (IsActive = 1 in the roster query). Ada and Ben swiped in the range above; Chi
 // never did, so Chi is the person the report must list as Absent on every day. Chi's EmployeeID
-// is absent: the column exists, the value does not, the cell stays "—". PeopleCard stands in for
+// is absent: the column exists, the value does not, the cell stays "—". Dee has no card, and the
+// swipe of PeopleID 42 has no roster entry: neither is on record, so neither ever appears. PeopleCard stands in for
 // dbo.p_people.CardNumber — the on-file badge card the roster query reads, preferred over the
 // OUTER APPLY's latest EventHistory card, so an absent day still shows a card.
 const roster = [
-  { PeopleID: 7, EmployeeID: "E-1007", Firstname: "Ada", Lastname: "Obi", Department: "Ops", PeopleCard: 1234 },
-  { PeopleID: 9, EmployeeID: "E-1009", Firstname: "Ben", Lastname: "Nwosu", Department: "Security", PeopleCard: 9876 },
-  { PeopleID: 11, EmployeeID: null, Firstname: "Chi", Lastname: "Eze", Department: "Ops", PeopleCard: null },
+  { PeopleID: 7, EmployeeID: "E-1007", Firstname: "Ada", Lastname: "Obi", Department: "Ops", PeopleCard: 1234, CardNumber: 1234 },
+  { PeopleID: 9, EmployeeID: "E-1009", Firstname: "Ben", Lastname: "Nwosu", Department: "Security", PeopleCard: 9876, CardNumber: 9876 },
+  { PeopleID: 11, EmployeeID: null, Firstname: "Chi", Lastname: "Eze", Department: "Ops", PeopleCard: 3333, CardNumber: 3333 },
+  // Active but holding no card anywhere: not on record, so never Present and never Absent.
+  { PeopleID: 13, EmployeeID: "E-1013", Firstname: "Dee", Lastname: "Uche", Department: "Ops", PeopleCard: null, CardNumber: null },
 ];
+// Everyone in the roster above who is on record (active *and* carded): Ada, Ben and Chi.
+const ON_RECORD = 3;
 
 // A fixed "now" (12 Oct 2026 09:00 UTC, i.e. 10:00 in Lagos) so the future-day cut-off is stable.
 const NOW = new Date("2026-10-12T09:00:00Z");
@@ -300,7 +305,6 @@ test("the Day column names each row's weekday in every period, and the absentee 
     ["2026-10-05", "Monday", "Obi Ada", "Present", "E-1007"],
     ["2026-10-05", "Monday", "Eze Chi", "Absent", "—"],
     ["2026-10-05", "Monday", "Nwosu Ben", "Absent", "E-1009"],
-    ["2026-10-05", "Monday", "Unknown", "Present", "—"], // swipe whose person is not in p_people
   ]);
 
   const range = await attendance.run({ mode: "range", start: "2026-10-05", end: "2026-10-07" }, { tz: 1, queryFn, now: NOW });
@@ -322,8 +326,8 @@ test("rows run by department, then Present before Absent, and by date inside eac
   const { queryFn } = fakeQuery();
   const rows = await attendance.run({ mode: "range", start: "2026-10-05", end: "2026-10-07" }, { tz: 1, queryFn, now: NOW });
 
-  // Ops first: its swipes, then its absences, each in date order. Security follows. A swipe whose
-  // person is missing from p_people lands in Unassigned and has no absence rows.
+  // Ops first: its swipes, then its absences, each in date order. Security follows. The swipe whose
+  // person is missing from p_people is not on record, and Dee (no card) is never listed.
   assert.deepEqual(rows.map((r) => [r.department, r.status, r.date, r.name]), [
     ["Ops", "Present", "2026-10-05", "Obi Ada"],
     ["Ops", "Present", "2026-10-06", "Obi Ada"],
@@ -334,12 +338,10 @@ test("rows run by department, then Present before Absent, and by date inside eac
     ["Security", "Present", "2026-10-06", "Nwosu Ben"],
     ["Security", "Absent", "2026-10-05", "Nwosu Ben"],
     ["Security", "Absent", "2026-10-07", "Nwosu Ben"],
-    ["Unassigned", "Present", "2026-10-05", "Unknown"],
   ]);
 
   // The same rule read as properties: the department's Present block and Absent block are each
   // date-ordered, no Present row ever lands after an Absent one, and nobody is listed twice a day.
-  // A department with only a swipe (person missing from p_people) has no Absent block.
   for (const [department, section] of Map.groupBy(rows, (r) => r.department)) {
     const statuses = [...Map.groupBy(section, (r) => r.status).keys()];
     assert.equal(statuses[0], "Present", department);
@@ -377,7 +379,6 @@ test("each department is cut into a Present block and an Absent block, with its 
   const headings = group(attendance, rows).map((section) => `${section.name} (${section.rows.length})`);
   assert.deepEqual(headings, [
     "Ops — Present (2)", "Ops — Absent (4)", "Security — Present (1)", "Security — Absent (2)",
-    "Unassigned — Present (1)",
   ]);
   // Status is the last column; the heading is still "Department — Present/Absent", not a column label.
   assert.equal(columnsFor(params).at(-1).key, "status");
@@ -385,7 +386,7 @@ test("each department is cut into a Present block and an Absent block, with its 
 
   // The screen splits identically, in the same order, because it reads the same grouping.
   assert.deepEqual([...sectionsOf(rows, attendance.groupBy).keys()], [
-    "Ops — Present", "Ops — Absent", "Security — Present", "Security — Absent", "Unassigned — Present",
+    "Ops — Present", "Ops — Absent", "Security — Present", "Security — Absent",
   ]);
 
   // So does the printable template Chromium renders (the Electron PDF source).
@@ -607,7 +608,6 @@ test("swipe rows keep one entry per person per local day and carry the date and 
     ["2026-10-05", "Obi Ada", "E-1007"],
     ["2026-10-06", "Obi Ada", "E-1007"],
     ["2026-10-06", "Nwosu Ben", "E-1009"],
-    ["2026-10-05", "Unknown", "—"], // swipe, person not in p_people: no badge, still shown
   ]);
   assert.equal(present[0].duration, "9h 11m");
   assert.equal(present[1].duration, "—"); // single swipe on the second day
@@ -622,8 +622,7 @@ test("eligible employees with no swipe are listed as Absent on every day of the 
   const out = await attendance.run({ mode: "range", start: "2026-10-05", end: "2026-10-07" }, { tz: 1, queryFn, now: NOW });
 
   // Chi never swiped: one Absent row per day, with the absence shown in the swipe columns too.
-  // Her EmployeeID is null, so the cell is "—", not PeopleID 11. She has no card on file, so the
-  // card cell is "—" too.
+  // Her EmployeeID is null, so the cell is "—", not PeopleID 11. Her card on file is 3333.
   const chi = out.filter((r) => r.name === "Eze Chi");
   assert.deepEqual(chi.map((r) => r.date), ["2026-10-05", "2026-10-06", "2026-10-07"]);
   for (const row of chi) {
@@ -631,7 +630,7 @@ test("eligible employees with no swipe are listed as Absent on every day of the 
     assert.equal(row.idNumber, "—");
     assert.equal(row.department, "Ops");
     assert.equal(row.accessCount, 0);
-    assert.equal(row.cardNumber, "—");
+    assert.equal(row.cardNumber, 3333);
     assert.equal(row.firstEntry, "—");
   }
   // Ada swiped on the 5th and 6th (card 1234), so her 7th is Absent but still shows E-1007 and
@@ -654,10 +653,8 @@ test("eligible employees with no swipe are listed as Absent on every day of the 
   assert.deepEqual(out.filter((r) => r.idNumber === "E-1009").map((r) => [r.date, r.status]), [
     ["2026-10-06", "Present"], ["2026-10-05", "Absent"], ["2026-10-07", "Absent"],
   ]);
-  // Chi and the unmatched swipe both display "—" on the 5th, and they stay two rows: the match
-  // key is PeopleID, not the displayed badge.
-  const sameDay = out.filter((r) => r.date === "2026-10-05" && r.idNumber === "—");
-  assert.deepEqual(sameDay.map((r) => [r.name, r.status]).sort(), [["Eze Chi", "Absent"], ["Unknown", "Present"]]);
+  // Nobody outside the active, carded set appears: not Dee (no card), not the unmatched swipe.
+  assert.equal(out.some((r) => r.name === "Uche Dee" || r.name === "Unknown"), false);
   // One row per person per day: never both Present and Absent for the same day.
   const keys = out.map((r) => `${r.name}|${r.date}`);
   assert.equal(new Set(keys).size, keys.length);
@@ -738,7 +735,7 @@ test("a database without EmployeeID shows and filters PeopleID, and still matche
   assert.notEqual(ben.idNumber, "E-1009");
 });
 
-test("an absentee with no swipe in the window shows the badge and the known card, and a zero card shows em dash", async () => {
+test("an absentee with no swipe in the window shows the badge and the on-file card; a zero card is no card, so that person is not on record", async () => {
   // No swipes at all, so everyone is absent; the on-file p_people.CardNumber is the primary card,
   // with the EventHistory OUTER APPLY card as the fallback. Dara's file card is 4242 (and a
   // different EventHistory card 9999, to prove the file card wins); Emeka's file card is 0, which is
@@ -757,14 +754,44 @@ test("an absentee with no swipe in the window shows the badge and the known card
   assert.equal(dara.name, "Okoro Dara");
   assert.equal(dara.cardNumber, 4242); // the on-file p_people card is shown even with no swipe
   assert.equal(dara.idNumber, "E-1015");
-  const emeka = absent.find((r) => r.idNumber === "E-1016");
-  assert.equal(emeka.cardNumber, "—"); // a file card of 0 is not a card, so the cell stays em dash
+  // A file card of 0 is not a card, and Emeka has no other: he is not on record in either report.
+  assert.equal(absent.some((r) => r.idNumber === "E-1016"), false);
   // The same Absentees report agrees with the attendance report's absent rows on both values.
   const attendanceRows = await attendance.run({ date: "2026-10-05" }, { tz: 1, queryFn, now: NOW });
   const daraRow = attendanceRows.find((r) => r.idNumber === "E-1015" && r.status === "Absent");
   assert.equal(daraRow.cardNumber, 4242);
-  const emekaRow = attendanceRows.find((r) => r.idNumber === "E-1016" && r.status === "Absent");
-  assert.equal(emekaRow.cardNumber, "—");
+  assert.equal(attendanceRows.some((r) => r.idNumber === "E-1016"), false);
+});
+
+test("only active, carded people are on record: others are neither Present nor Absent", async () => {
+  const people = [
+    { PeopleID: 1, EmployeeID: "A1", Firstname: "Ann", Lastname: "Card", Department: "Ops", PeopleCard: 100, CardNumber: 100 },
+    // Active, no card anywhere — not on record, even though a granted swipe exists without a card value.
+    { PeopleID: 2, EmployeeID: "A2", Firstname: "Bo", Lastname: "Nocard", Department: "Ops", PeopleCard: null, CardNumber: null },
+    // Active, no card on file, but swipes with card 300 this run: that card makes them on record.
+    { PeopleID: 3, EmployeeID: "A3", Firstname: "Cy", Lastname: "Swipecard", Department: "Ops", PeopleCard: null, CardNumber: null },
+  ];
+  const swipes = [
+    { LocalDate: "2026-10-05", PeopleID: 1, EmployeeID: "A1", Firstname: "Ann", Lastname: "Card", Department: "Ops",
+      CardNumber: 100, FirstEntry: "08:00:00", LastEntry: "17:00:00", DurationMin: 540, AccessCount: 2 },
+    { LocalDate: "2026-10-05", PeopleID: 3, EmployeeID: "A3", Firstname: "Cy", Lastname: "Swipecard", Department: "Ops",
+      CardNumber: 300, FirstEntry: "08:00:00", LastEntry: "08:00:00", DurationMin: 0, AccessCount: 1 },
+    // Inactive (not in the IsActive = 1 roster) — the swipe is dropped.
+    { LocalDate: "2026-10-05", PeopleID: 4, EmployeeID: "X4", Firstname: "Old", Lastname: "Leaver", Department: "Ops",
+      CardNumber: 400, FirstEntry: "09:00:00", LastEntry: "09:00:00", DurationMin: 0, AccessCount: 1 },
+  ];
+  const queryFn = async (sql) => {
+    if (/INFORMATION_SCHEMA/.test(sql)) return [{ name: "EventUTCTime", kind: "datetime" }, { name: "EmployeeID", kind: "nvarchar" }, { name: "CardNumber", kind: "int" }];
+    if (/IsActive/.test(sql)) return people;
+    return swipes;
+  };
+  const rows = await attendance.run({ mode: "range", start: "2026-10-05", end: "2026-10-06" }, { tz: 1, queryFn, now: NOW });
+  assert.deepEqual(rows.map((r) => [r.idNumber, r.date, r.status]), [
+    ["A1", "2026-10-05", "Present"], ["A3", "2026-10-05", "Present"],
+    ["A1", "2026-10-06", "Absent"], ["A3", "2026-10-06", "Absent"],
+  ]);
+  const absent = await absentees.run({ mode: "range", start: "2026-10-05", end: "2026-10-06" }, { tz: 1, queryFn, now: NOW });
+  assert.deepEqual(absent.map((r) => r.idNumber), ["A1", "A3"]);
 });
 
 test("a person listed twice in the roster is reported once per day", async () => {
@@ -790,7 +817,7 @@ test("a future day is never reported absent, for a single date, a range or a mon
   assert.deepEqual(future, []); // a day that has not happened yet has neither swipes nor absences
 
   const today = await attendance.run({ date: "2026-10-12" }, { tz: 1, queryFn: empty, now: NOW });
-  assert.equal(today.length, roster.length); // today is reported, so today's absences are visible
+  assert.equal(today.length, ON_RECORD); // today is reported, so today's absences are visible
 });
 
 test("a single date lists every eligible employee who did not swipe that day", async () => {
@@ -811,7 +838,7 @@ test("absentRows needs no database and respects the cut-off and the weekend sett
   const people = [{ key: "7", name: "Obi Ada", idNumber: 7, department: "Ops" }];
   const none = new Set();
   // 10 and 11 Oct 2026 are a Saturday and a Sunday; 12 Oct is today.
-  const week = absentRows({ start: "2026-10-09", end: "2026-10-13", today: "2026-10-12", roster: people, presentKeys: none });
+  const week = absentRows({ start: "2026-10-09", end: "2026-10-13", today: "2026-10-12", roster: people, presentKeys: none, skipWeekends: false });
   assert.deepEqual(week.map((r) => r.date), ["2026-10-09", "2026-10-10", "2026-10-11", "2026-10-12"]);
   assert.equal(week.every((r) => r.status === "Absent"), true);
 
@@ -823,14 +850,17 @@ test("absentRows needs no database and respects the cut-off and the weekend sett
   const present = absentRows({
     start: "2026-10-09", end: "2026-10-09", today: "2026-10-12", roster: people, presentKeys: new Set(["7|2026-10-09"]),
   });
+  // The default skips the weekend: the same week gives Friday and Monday only.
+  assert.deepEqual(absentRows({ start: "2026-10-09", end: "2026-10-13", today: "2026-10-12", roster: people, presentKeys: none })
+    .map((r) => r.date), ["2026-10-09", "2026-10-12"]);
   assert.deepEqual(present, []);
-  assert.equal(ABSENCE_SKIP_WEEKENDS, false); // the default counts every calendar day
+  assert.equal(ABSENCE_SKIP_WEEKENDS, true); // working days are Monday to Friday
 });
 
 test("runPeriod returns the swipes and the absences as separate lists", async () => {
   const { queryFn } = fakeQuery();
   const { present, absent } = await runPeriod({ date: "2026-10-05" }, { tz: 1, queryFn, now: NOW });
-  assert.deepEqual(present.map((r) => r.name), ["Obi Ada", "Unknown"]);
+  assert.deepEqual(present.map((r) => r.name), ["Obi Ada"]);
   assert.deepEqual(absent.map((r) => r.name), ["Eze Chi", "Nwosu Ben"]); // sorted by department, then name
 });
 

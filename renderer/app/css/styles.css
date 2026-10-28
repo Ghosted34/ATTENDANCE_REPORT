@@ -374,6 +374,7 @@ input[type="text"],
 input[type="date"],
 input[type="month"],
 input[type="number"],
+input[type="time"],
 input[type="password"],
 select,
 textarea {
@@ -2338,4 +2339,160 @@ td:not(.wrap):not(:first-child) {
    whole table, so the scrollbar does not promise thousands of pixels that are not there. */
 .table-wrap table.grouped tbody {
   contain-intrinsic-size: auto 400px;
+}
+
+/* =============================================================================
+   CLEAN-UP LAYER (overrides earlier rules)
+   ============================================================================ */
+
+/* Home: a plain page header instead of the hero */
+.home-head {
+  margin: 8px 0 24px;
+}
+
+.home-head h1 {
+  margin: 0 0 4px;
+  font-size: clamp(25px, 3vw, 30px);
+  letter-spacing: -0.03em;
+}
+
+.home-head .muted,
+.report-head .muted {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: var(--text-body);
+}
+
+/* Report header: title and one line */
+.report-head {
+  display: block;
+  margin-bottom: 18px;
+}
+
+.report-head h1 {
+  margin: 0 0 4px;
+  font-size: clamp(23px, 2.6vw, 27px);
+  letter-spacing: -0.03em;
+}
+
+/* Status line sits above the table, left-aligned */
+.report-meta {
+  justify-content: flex-start;
+  max-width: none;
+  margin: 18px 2px 8px;
+  padding: 0;
+  min-height: 0;
+  border: 0;
+  text-align: left;
+}
+
+/* Action row: compact, no labels */
+.toolbar-actions {
+  align-items: center;
+  padding: 10px 18px;
+}
+
+.toolbar-view-controls {
+  align-items: center;
+  gap: 10px;
+}
+
+/* Time fields (e.g. Punctuality's resumption / late / very late): a clock time needs less room. */
+.toolbar .field.time-field {
+  width: 136px;
+}
+
+/* A labelled box of related fields (Punctuality's arrival times), side by side at equal width. */
+.toolbar .field.field-group {
+  width: auto;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 8px 12px 10px;
+  background: var(--surface);
+}
+
+.toolbar .field-group > legend {
+  padding: 0 4px;
+  margin: 0 0 0 -4px;
+}
+
+.toolbar .field-group-row {
+  display: grid;
+  grid-template-columns: repeat(3, 128px);
+  gap: 10px;
+}
+
+.toolbar .field-group .field {
+  width: auto;
+  margin: 0;
+}
+
+.toolbar .field-group .hint {
+  margin: 6px 0 0;
+}
+
+@media (max-width: 680px) {
+  .toolbar .field.field-group { width: 100%; }
+  .toolbar .field-group-row { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .toolbar .field-group input[type="time"] { padding-left: 8px; padding-right: 4px; }
+  .toolbar .field-group input[type="time"]::-webkit-calendar-picker-indicator { display: none; }
+}
+
+input[type="time"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+input[type="time"]::-webkit-calendar-picker-indicator:hover {
+  opacity: 1;
+}
+
+/* Day picker: seven toggles, Sun–Sat */
+.toolbar .field.days-field {
+  width: auto;
+}
+
+.day-picker {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.day-picker .day {
+  min-width: 40px;
+  height: 40px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: var(--text-hint);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.day-picker .day:hover {
+  border-color: var(--line-strong);
+  color: var(--ink-1);
+}
+
+.day-picker .day[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.day-picker .day:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+@media (max-width: 680px) {
+  .day-picker .day { min-width: 34px; height: 36px; }
+}
+
+.home-head + .report-library {
+  margin-top: 0;
+  padding-top: 0;
 }
